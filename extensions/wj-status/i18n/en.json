@@ -1,0 +1,32 @@
+{
+  "status": {
+    "ready": "READY",
+    "working": "WORKING",
+    "error": "ERROR"
+  },
+  "line1": {
+    "in": "in",
+    "out": "out",
+    "ctx": "ctx"
+  },
+  "line2": {
+    "cache": "cache",
+    "bal": "bal"
+  },
+  "generic": {
+    "untitled": "untitled",
+    "unknown": "UNKNOWN"
+  },
+  "duration": {
+    "day": "d",
+    "hour": "h",
+    "minute": "m",
+    "second": "s",
+    "ms": "ms"
+  },
+  "compaction": {
+    "auto": "(auto)",
+    "off": "(off)",
+    "unknown": "(\u2014)"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "wj-status",
+  "version": "0.1.0",
+  "description": "WJ Status — lightweight Pi status bar: model, tokens, cache, cost, context, CWD",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package", "pi", "extension", "status-bar", "footer"],
+  "files": ["extensions"],
+  "pi": {
+    "extensions": ["./extensions/index.ts"]
+  }
+}

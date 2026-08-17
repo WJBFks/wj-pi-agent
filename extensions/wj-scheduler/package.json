@@ -1,0 +1,12 @@
+{
+  "name": "wj-scheduler",
+  "version": "0.1.0",
+  "description": "WJ Scheduler — 修复了跨进程锁竞争的定时任务管理器",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package", "pi", "extension", "scheduler", "cron", "tasks"],
+  "files": ["extensions"],
+  "pi": {
+    "extensions": ["./extensions/index.js"]
+  }
+}

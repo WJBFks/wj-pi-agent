@@ -1,0 +1,12 @@
+{
+  "USD": {
+    "symbol": "$",
+    "rate": 1,
+    "decimals": 4
+  },
+  "CNY": {
+    "symbol": "\u00a5",
+    "rate": 7,
+    "decimals": 4
+  }
+}

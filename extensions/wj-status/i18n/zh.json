@@ -1,0 +1,32 @@
+{
+  "status": {
+    "ready": "就绪",
+    "working": "工作中",
+    "error": "错误"
+  },
+  "line1": {
+    "in": "输入",
+    "out": "输出",
+    "ctx": "上下文"
+  },
+  "line2": {
+    "cache": "缓存",
+    "bal": "余额"
+  },
+  "generic": {
+    "untitled": "未命名",
+    "unknown": "未知"
+  },
+  "duration": {
+    "day": "天",
+    "hour": "时",
+    "minute": "分",
+    "second": "秒",
+    "ms": "毫秒"
+  },
+  "compaction": {
+    "auto": "(自动)",
+    "off": "(关闭)",
+    "unknown": "(\u2014)"
+  }
+}

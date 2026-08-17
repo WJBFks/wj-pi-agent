@@ -1,0 +1,42 @@
+# ================================================
+# ~/.pi/agent 版本控制忽略规则
+# 策略：忽略敏感 / 本机环境 / 运行时 / 临时 / 演示内容
+# 保留：可移植配置 + 用户自定义扩展与技能
+#   （SYSTEM.md、settings.json、tools.json、
+#    extensions/、skills/、prompts/）
+# ================================================
+
+# ----- 敏感凭据 / 本机状态 / 本机二进制 -----
+auth.json
+models-store.json
+trust.json
+bin/
+
+# ----- 运行时 / 会话数据 -----
+sessions/
+workflow-runs/
+data/
+
+# ----- 依赖包（可再生） -----
+npm/
+
+# ----- 演示 / 遗留 / 测试 -----
+tasks/
+test/
+deprecated/
+
+# ----- Python 缓存 -----
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# ----- 系统与编辑器文件 -----
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp
+.idea/
+.vscode/

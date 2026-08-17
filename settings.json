@@ -1,0 +1,16 @@
+{
+  "lastChangelogVersion": "0.82.1",
+  "theme": "dark",
+  "packages": [
+    "npm:@vigolium/piolium",
+    "npm:pi-mcp-adapter",
+    "npm:pi-web-access",
+    "npm:pi-subagents",
+    "npm:@juicesharp/rpiv-ask-user-question",
+    "./extensions/wj-status",
+    "npm:@plannotator/pi-extension"
+  ],
+  "defaultProvider": "opencode-go",
+  "defaultModel": "deepseek-v4-flash",
+  "defaultThinkingLevel": "high"
+}
