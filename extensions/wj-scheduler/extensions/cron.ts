@@ -12,7 +12,7 @@ export function computeNextCronRun(expression: string): string | undefined {
   if (fields.length !== 5) return undefined;
 
   const now = new Date();
-  // 从下一分钟开始搜索
+  // 从当前分钟 0 秒起搜索，但候选时间必须严格晚于 now（跳过已过去的分钟）
   let search = new Date(now);
   search.setSeconds(0, 0);
 
@@ -21,6 +21,8 @@ export function computeNextCronRun(expression: string): string | undefined {
   for (let i = 0; i < 525600; i++) {
     // 最多搜索 1 年
     const candidate = new Date(search.getTime() + i * 60 * 1000);
+    // 修复：候选时间须严格晚于当前时刻，否则 delay 为负会导致调度被跳过且永不重试
+    if (candidate.getTime() <= now.getTime()) continue;
 
     if (!matchField(candidate.getMonth() + 1, monField, 1, 12)) continue;
     if (!matchField(candidate.getDate(), domField, 1, 31)) continue;
