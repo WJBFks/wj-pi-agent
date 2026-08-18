@@ -400,9 +400,13 @@ class WJScheduler {
         await this.store.update(task.id, fixed).catch(() => {});
         this.#schedule(fixed);
       } else {
-        // interval 追赶：错过间隔（上次运行/创建 + 间隔 ≤ 现在）则立即补执行一次
+        // 错过补执行：interval 超间隔、once 已到时刻（未执行过）均立即补一次
         await this.#maybeCatchUpInterval(task);
-        this.#schedule(this.#withNextRun(task));
+        await this.#maybeCatchUpOnce(task);
+        // 补跑后以最新状态为准：once 已完成/禁用则不再调度（避免误判过期报错）
+        const latest = await this.store.get(task.id);
+        if (latest && latest.enabled === false) continue;
+        this.#schedule(this.#withNextRun(latest ?? task));
       }
     }
   }
@@ -478,7 +482,10 @@ class WJScheduler {
     if (task.type === "once") {
       const delay = new Date(task.schedule).getTime() - Date.now();
       if (delay <= 0) {
-        this.#markError(task.id, `调度时间 ${task.schedule} 已过期`);
+        // 错过且已通过 catch-up 补跑成功（lastStatus=success）→ 不调度不报错，避免覆盖成功状态
+        if (task.lastStatus !== "success") {
+          this.#markError(task.id, `调度时间 ${task.schedule} 已过期`);
+        }
         return;
       }
       const timer = setTimeout(() => this.#execute(task.id).catch(() => {}), delay);
@@ -603,6 +610,18 @@ class WJScheduler {
       ? new Date(task.lastRunAt).getTime()
       : new Date(task.createdAt).getTime();
     if (!Number.isNaN(base) && Date.now() >= base + intervalMs) {
+      await this.#execute(task.id);
+    }
+  }
+
+  /**
+   * once 任务追赶：重启后若调度时刻已过（错过且尚未执行），立即补执行一次。
+   * 执行成功后 once 任务自动禁用（一次性语义）。
+   */
+  async #maybeCatchUpOnce(task: Task): Promise<void> {
+    if (task.type !== "once" || !task.enabled) return;
+    const ts = task.schedule ? new Date(task.schedule).getTime() : NaN;
+    if (!Number.isNaN(ts) && ts <= Date.now()) {
       await this.#execute(task.id);
     }
   }

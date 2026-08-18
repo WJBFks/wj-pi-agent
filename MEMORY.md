@@ -115,6 +115,7 @@
 - **cron 解析器抽为共享模块 `cron.ts`**（export computeNextCronRun）：index.ts（调度）与 status.ts（下次时间估算）共用，避免循环依赖；架构上 index.ts → status.ts → cron.ts, index.ts → cron.ts 单向无环
 - ⚠️ **cron 调度 bug 教训（2026-08-18 修复）**：computeNextCronRun 原从当前分钟 0 秒起搜索，非整分创建任务时返回的「下一次」是已过去的当前分钟 → `#scheduleNextCron` 的 `delay<=0` 直接 return 且无重试 → **cron 任务创建后永不触发**（interval/once 不受影响，症状=任务 show 但 runCount 恒 0）。修复：候选时间 `<= now` 时 continue。已通过端到端验证（非整分创建→整分正常触发）
 - **interval 追赶（catch-up，2026-08-18 新增）**：start() 重排已有任务时若「上次运行（无则创建时间）+ 间隔 ≤ 现在」立即补执行一次；cron/once 不受影响；4 场景验证通过（错过补/首跑超时补/未超不补/cron 不追）
+- **错过策略（2026-08-18 完整对齐用户预期）**：① interval 错过 → 立即补一次并按当前时间重算周期；② once 错过 → 立即补一次并自动禁用；③ cron 错过 → 跳过不执行、重算下一次（effectiveNextRun 不采用过期 nextRunAt）。实现要点：start() else 分支先 catch-up（interval+once）后按**最新 store 状态**决定是否调度（避免旧快照把补跑成功的 once 误标 error）；#schedule once 分支对已成功补跑的任务不再 markError；补跑后 `latest.enabled===false` 则 skip 调度
 - **共享桥协议**：wj-status footer `renderLine2` 渲染时读 `__wj_scheduler_footer_lines` 追加到自身行下方；**桥内容纯文本，宿主统一样式化**：深灰蓝背景 `48;2;34;40;50` + 前景灰蓝 `38;2;148;163;184` + 边框 `┌─┐/│ │/└─┘`（行宽按 visibleLen 补足到 width，ANSI 由 truncateToVisible 保持）;两扩展通过 globalThis 桥解耦，无相互 import
 - **重构要点**：新增 Task/TaskInput/HistoryEntry/SchedulerStatus 类型 + 类字段类型 + 方法签名；`import type { ExtensionAPI }`；删除零引用的死代码（defineTool/TString/TBoolean/TObject）；工具注册用本地 `register` 包装（any 上下文，规避 TypeBox 类型噪音）；`import type` 在运行时被剥离，无新增依赖
 - 锁实现：PerProcessLock（每个 session 独立锁文件，PID 存活检查）
