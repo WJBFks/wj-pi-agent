@@ -23,7 +23,6 @@ import { createRequire } from "node:module";
 // 常量
 // ──────────────────────────────────────
 const SETTINGS_KEY = "wj-scheduler";
-const STATUS_KEY = "wj-scheduler";
 
 /**
  * 解析用户主目录
@@ -660,16 +659,10 @@ export default function wjSchedulerExtension(pi) {
       scheduler = instance;
       ownsScheduler = true;
 
-      ctx.ui.setStatus(
-        STATUS_KEY,
-        scheduler.isActive() ? "wj-scheduler: active" : "wj-scheduler: idle",
-      );
-
       // 注册 LLM 工具
       registerTools(pi, scheduler);
     } catch (e) {
       console.error("[wj-scheduler] 启动失败:", e);
-      ctx.ui.setStatus(STATUS_KEY, "wj-scheduler: unavailable");
     }
   });
 
