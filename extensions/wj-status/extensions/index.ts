@@ -522,11 +522,25 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
     const v = visibleLen;
 
     // 扩展行（共享桥）：wj-scheduler 等扩展发布的任务状态行，追加在本栏下方
+    // 样式：深灰蓝背景 + 边框（┌─┐/│ │/└─┘），低调不抢主状态栏
+    const BRIDGE_BG = "\x1b[48;2;34;40;50m";
+    const BRIDGE_FG = "\x1b[38;2;148;163;184m";
+    const BRIDGE_RST = "\x1b[0m";
+    const styleBridgeRow = (text: string): string => {
+      const inner = truncateToVisible(text, Math.max(2, width - 4));
+      const pad = Math.max(0, width - 4 - visibleLen(inner));
+      return BRIDGE_BG + BRIDGE_FG + "│ " + inner + " ".repeat(pad) + " │" + BRIDGE_RST;
+    };
     const bridgeExtra = (globalThis as Record<string, unknown>)["__wj_scheduler_footer_lines"];
-    const extras: string[] =
-      Array.isArray(bridgeExtra) && bridgeExtra.length > 0
-        ? bridgeExtra.map((s) => dim(String(s)))
-        : [];
+    const rawExtras: string[] =
+      Array.isArray(bridgeExtra) && bridgeExtra.length > 0 ? bridgeExtra.map(String) : [];
+    const extras: string[] = rawExtras.length > 0
+      ? [
+          BRIDGE_BG + BRIDGE_FG + "┌" + "─".repeat(Math.max(0, width - 2)) + "┐" + BRIDGE_RST,
+          ...rawExtras.map(styleBridgeRow),
+          BRIDGE_BG + BRIDGE_FG + "└" + "─".repeat(Math.max(0, width - 2)) + "┘" + BRIDGE_RST,
+        ]
+      : [];
     const withExtras = (rows: string[]) => [...rows.map((r) => truncateToVisible(r, width)), ...extras];
 
     // ① 1 行：左右同行（右部右对齐）

@@ -34,8 +34,9 @@
 
 **扩展间通信（共享桥约定）**：wj-status 的底部状态栏（`renderLine2`）渲染时读取
 `globalThis.__wj_scheduler_footer_lines`（`string[] | null | undefined`）并追加到自身行**下方**；
-wj-scheduler 的 `status.ts` 定时发布该桥（空任务时发布 `null` 隐藏）。新扩展要往最底部
-加内容时沿用此桥模式，并须同步更新本清单。
+**桥内容为纯文本**（无 ANSI），样式（深灰蓝背景 + `┌─┐│└─┘` 边框，行宽补足到 width）
+由宿主 wj-status 统一渲染；wj-scheduler 的 `status.ts` 定时发布该桥（空任务时发布 `null` 隐藏）。
+新扩展要往最底部加内容时沿用此桥模式，并须同步更新本清单。
 
 ## 三、数据存放规范（重要）
 
