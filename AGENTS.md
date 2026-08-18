@@ -36,6 +36,10 @@
 `globalThis.__wj_scheduler_footer_lines`（`string[] | null | undefined`）并追加到自身行**下方**；
 **桥内容为纯文本**（无 ANSI），样式（深灰蓝背景 + `┌─┐│└─┘` 边框，行宽补足到 width）
 由宿主 wj-status 统一渲染；wj-scheduler 的 `status.ts` 定时发布该桥（空任务时发布 `null` 隐藏）。
+**宽度计算规范**：宿主渲染所有行（含桥行）必须用 pi-tui 导出的 `visibleWidth()` / `truncateToWidth()`
+（`import { visibleWidth, truncateToWidth } from "@earendil-works/pi-tui"`，扩展加载器已配置 alias），
+禁止自实现宽度表——自实现表对 `⏰`(U+23F0)、`🔔`(U+1F514) 等 Ambiguous/emoji 字符的宽度判断
+与框架不一致，会导致补白/截断误差、行宽超界，触发 `pi exiting due to uncaughtException`。
 新扩展要往最底部加内容时沿用此桥模式，并须同步更新本清单。
 
 ## 三、数据存放规范（重要）

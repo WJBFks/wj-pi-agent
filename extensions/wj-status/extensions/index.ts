@@ -2,6 +2,9 @@ import { mkdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ExtensionAPI, type ExtensionContext, CustomEditor, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
+// 用 pi-tui 官方的宽度工具（与 TUI 渲染宽度完全一致），避免自实现宽度表对
+// ⏰(U+23F0) 等 Ambiguous 字符误判导致渲染行超宽、pi 崩溃。
+import { visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
 import { getBalance } from "./balance";
 
 /**
@@ -146,47 +149,8 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
 
   // ---- helpers ----
 
-  /** Strip ANSI escape codes and return visible width. */
-  function visibleLen(s: string): number {
-    const plain = s.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
-    let w = 0;
-    for (const ch of plain) {
-      const cp = ch.codePointAt(0) ?? 0;
-      // CJK / wide chars count as 2, rest as 1
-      w += (cp >= 0x1100 && (cp <= 0x115F || cp === 0x2329 || cp === 0x232A ||
-        (cp >= 0x2E80 && cp <= 0xA4CF) || (cp >= 0xAC00 && cp <= 0xD7AF) ||
-        (cp >= 0xF900 && cp <= 0xFAFF) || (cp >= 0xFE30 && cp <= 0xFE6F) ||
-        (cp >= 0xFF01 && cp <= 0xFF60) || (cp >= 0xFFE0 && cp <= 0xFFE6) ||
-        (cp >= 0x1B000 && cp <= 0x1B2FF) || (cp >= 0x20000 && cp <= 0x2FA1F))) ? 2 : 1;
-    }
-    return w;
-  }
-
-  /** Truncate a string to a visible width, preserving ANSI codes. */
-  function truncateToVisible(s: string, maxW: number): string {
-    if (visibleLen(s) <= maxW) return s;
-    // Simple approach: try shorter slices until visible width fits
-    let result = "";
-    let w = 0;
-    const ansiRe = /(\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]))|([\s\S])/g;
-    let m;
-    while ((m = ansiRe.exec(s)) !== null) {
-      if (m[1]) {
-        result += m[1]; // keep ANSI codes
-      } else if (m[2]) {
-        const cp = m[2].codePointAt(0) ?? 0;
-        const cw = (cp >= 0x1100 && (cp <= 0x115F || cp === 0x2329 || cp === 0x232A ||
-          (cp >= 0x2E80 && cp <= 0xA4CF) || (cp >= 0xAC00 && cp <= 0xD7AF) ||
-          (cp >= 0xF900 && cp <= 0xFAFF) || (cp >= 0xFE30 && cp <= 0xFE6F) ||
-          (cp >= 0xFF01 && cp <= 0xFF60) || (cp >= 0xFFE0 && cp <= 0xFFE6) ||
-          (cp >= 0x1B000 && cp <= 0xB2FF) || (cp >= 0x20000 && cp <= 0x2FA1F))) ? 2 : 1;
-        if (w + cw > maxW) break;
-        w += cw;
-        result += m[2];
-      }
-    }
-    return result;
-  }
+  // 宽度测量/截断统一使用 pi-tui 的 visibleWidth / truncateToWidth（见文件头注释），
+  // 不再自实现，确保与 TUI 渲染宽度完全一致。
 
   function fmt(n: number): string {
     if (!Number.isFinite(n) || n < 0) return "\u2014";
@@ -469,16 +433,17 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
       const rightUnits = kept.filter((u) => u.key === "thinkPref" || u.key === "think");
       const left = leftUnits.map((u) => u.render()).join(` ${muted("\u00b7")} `);
       const right = rightUnits.map((u) => u.render()).join(" ");
-      const gap = width - visibleLen(left) - visibleLen(right);
+      const gap = width - visibleWidth(left) - visibleWidth(right);
       if (gap >= 2) {
-        return truncateToVisible(
+        return truncateToWidth(
           gap >= 4 ? left + muted(" ".repeat(gap)) + right : left + "  " + right,
           width,
+          "",
         );
       }
     }
     // 极端兜底：只剩 think 级别
-    return truncateToVisible(BLUE + think + RESET, width);
+    return truncateToWidth(BLUE + think + RESET, width, "");
   }
 
   /**
@@ -519,39 +484,49 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
     const rightItems = [ctxNode, cacheNode, costNode];
     if (balNode) rightItems.push(balNode);
     const rightFull = rightItems.join(` ${dim(sep)} `);
-    const v = visibleLen;
+    const v = visibleWidth;
 
     // 扩展行（共享桥）：wj-scheduler 等扩展发布的任务状态行，追加在本栏下方
-    // 样式：深灰蓝背景 + 边框（┌─┐/│ │/└─┘），低调不抢主状态栏
+    // 样式：深灰蓝背景 + 边框（上框内嵌居中标题 /│ │/└─┘），低调不抢主状态栏
     const BRIDGE_BG = "\x1b[48;2;34;40;50m";
     const BRIDGE_FG = "\x1b[38;2;148;163;184m";
     const BRIDGE_RST = "\x1b[0m";
     const styleBridgeRow = (text: string): string => {
-      const inner = truncateToVisible(text, Math.max(2, width - 4));
-      const pad = Math.max(0, width - 4 - visibleLen(inner));
+      // 用 pi-tui 工具测量/截断：inner 可见宽 ≤ width-4，pad 精确补足到 width-4，
+      // 加上两侧 "│ " + " │" 的 4 列，总行宽恰为 width，不会超宽。
+      const inner = truncateToWidth(text, Math.max(2, width - 4), "");
+      const pad = Math.max(0, width - 4 - visibleWidth(inner));
       return BRIDGE_BG + BRIDGE_FG + "│ " + inner + " ".repeat(pad) + " │" + BRIDGE_RST;
     };
     const bridgeExtra = (globalThis as Record<string, unknown>)["__wj_scheduler_footer_lines"];
     const rawExtras: string[] =
       Array.isArray(bridgeExtra) && bridgeExtra.length > 0 ? bridgeExtra.map(String) : [];
+    const BRIDGE_TITLE = " wj-scheduler ";
+    const titlePad = Math.max(0, width - 2 - visibleWidth(BRIDGE_TITLE));
+    const titleLeft = Math.floor(titlePad / 2);
+    const titleRight = titlePad - titleLeft;
     const extras: string[] = rawExtras.length > 0
       ? [
-          BRIDGE_BG + BRIDGE_FG + "┌" + "─".repeat(Math.max(0, width - 2)) + "┐" + BRIDGE_RST,
+          BRIDGE_BG + BRIDGE_FG + "┌" + "─".repeat(titleLeft) + BRIDGE_TITLE + "─".repeat(titleRight) + "┐" + BRIDGE_RST,
           ...rawExtras.map(styleBridgeRow),
           BRIDGE_BG + BRIDGE_FG + "└" + "─".repeat(Math.max(0, width - 2)) + "┘" + BRIDGE_RST,
         ]
       : [];
-    const withExtras = (rows: string[]) => [...rows.map((r) => truncateToVisible(r, width)), ...extras];
+    const withExtras = (rows: string[]) => [
+      ...rows.map((r) => truncateToWidth(r, width, "")),
+      // 兜底：桥行也按框架宽度截断，任何情况下都不超宽（pi-tui 截断时会补 reset）
+      ...extras.map((r) => truncateToWidth(r, width, "")),
+    ];
 
     // ① 1 行：左右同行（右部右对齐）
     const gap = width - v(leftFull) - v(rightFull);
     if (gap >= 4) {
-      return withExtras([truncateToVisible(leftFull + muted(" ".repeat(gap)) + rightFull, width)]);
+      return withExtras([truncateToWidth(leftFull + muted(" ".repeat(gap)) + rightFull, width, "")]);
     }
 
     // ② 2 行：左部一行、右部一行（均靠左）
     if (v(leftFull) <= width && v(rightFull) <= width) {
-      return withExtras([truncateToVisible(leftFull, width), truncateToVisible(rightFull, width)]);
+      return withExtras([truncateToWidth(leftFull, width, ""), truncateToWidth(rightFull, width, "")]);
     }
 
     // ③ 4 行：细拆为 session·dur / cwd / ctx·cache / cost·bal
@@ -559,7 +534,7 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
     const row2 = dim(cwd);
     const row3 = [ctxNode, cacheNode].join(` ${dim(sep)} `);
     const row4 = [costNode, ...(balNode ? [balNode] : [])].join(` ${dim(sep)} `);
-    return withExtras([row1, row2, row3, row4].map((l) => truncateToVisible(l, width)));
+    return withExtras([row1, row2, row3, row4].map((l) => truncateToWidth(l, width, "")));
   }
 
 

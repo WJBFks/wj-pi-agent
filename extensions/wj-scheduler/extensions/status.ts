@@ -97,7 +97,7 @@ function effectiveNextRun(t: TaskLike): string | undefined {
 /**
  * 构建要展示的任务行（纯文本，无 ANSI）：
  * 仅保留 enabled 任务，按下次执行时间升序。
- * 行格式：⏰ 标题 · 定时类型 · 间隔(仅循环任务) · 下次YYYY/MM/DD-HH:mm:ss · 上次YYYY/MM/DD-HH:mm:ss(有则显示)
+ * 行格式：序号. 标题 · 定时类型 · 间隔(仅循环任务) · 下次YYYY/MM/DD-HH:mm:ss · 上次YYYY/MM/DD-HH:mm:ss(有则显示)
  */
 export function buildTaskLines(list: TaskLike[]): string[] {
   return list
@@ -107,8 +107,9 @@ export function buildTaskLines(list: TaskLike[]): string[] {
       const tb = effectiveNextRun(b) ? new Date(effectiveNextRun(b)!).getTime() : Number.MAX_SAFE_INTEGER;
       return ta - tb;
     })
-    .map((t) => {
-      const parts = [`⏰ ${t.name ?? "(未命名)"}`, typeLabel(t)];
+    .map((t, i) => {
+      // 执行顺序号（1 起）；⏰ 改为序号，便于按序执行/识别
+      const parts = [`${i + 1}. ${t.name ?? "(未命名)"}`, typeLabel(t)];
       const interval = loopInterval(t);
       if (interval) parts.push(interval);
       const next = timeLabel(effectiveNextRun(t));
