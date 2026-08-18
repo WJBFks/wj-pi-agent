@@ -1,7 +1,8 @@
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type ExtensionAPI, type ExtensionContext, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, CustomEditor, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { getBalance } from "./balance";
 
 /**
  * WJ Status — lightweight status bar for Pi.
@@ -207,33 +208,8 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
       apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider);
     } catch {}
     if (!apiKey) return null;
-
-    try {
-      if (provider === "deepseek") {
-        // DeepSeek returns CNY - always display as CNY with ¥
-        const res = await fetch("https://api.deepseek.com/user/balance", {
-          headers: { "Authorization": `Bearer ${apiKey}` },
-          signal: AbortSignal.timeout(5000),
-        });
-        if (!res.ok) return null;
-        const data = await res.json() as any;
-        const bal = data?.balance_infos?.[0]?.total_balance ?? data?.balance;
-        return bal != null ? `\u00a5${Number(bal).toFixed(2)}` : null;
-      }
-      if (provider === "openai" || provider === "openai-compatible") {
-        // OpenAI returns USD - always display as USD with $
-        const res = await fetch("https://api.openai.com/v1/dashboard/billing/subscription", {
-          headers: { "Authorization": `Bearer ${apiKey}` },
-          signal: AbortSignal.timeout(5000),
-        });
-        if (!res.ok) return null;
-        const data = await res.json() as any;
-        const bal = data?.account_balance ?? data?.balance ?? data?.hard_limit_usd;
-        return bal != null ? `\u0024${Number(bal).toFixed(2)}` : null;
-      }
-      return null;
-    } catch {}
-    return null;
+    // 按供应商分发到 ./balance.ts 中的对应实现
+    return getBalance(provider, apiKey);
   }
 
   const CACHE_FILE = join(EXT_DIR, "balance-cache.json");
@@ -261,6 +237,9 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
   }
 
   let footerTuiRef: any = null;
+  // 编辑器的 theme 是 pi-tui 的 EditorTheme（只有 borderColor/selectList，无 fg）。
+  // 颜色需用 footer/widget 工厂拿到的 atelier 主题（有 theme.fg(role, text)）。
+  let atelierThemeRef: any = null;
   let balanceTimer: ReturnType<typeof setInterval> | undefined;
 
   function applyBalance(b: string | null): void {
@@ -412,97 +391,189 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
 
   // ---- footer ----
 
-  function installFooter(ctx: ExtensionContext): void {
+  // 其他扩展通过 ctx.ui.setStatus() 写入的状态（如 "wj-scheduler: active"）。
+  // 这类数据只能从 setFooter 的 footerData 读取（widget 工厂拿不到），
+  // 因此用 footer 组件兼任“状态缓存桥”：每次渲染时同步最新状态供 widget 使用。
+  let statusesCache: string[] = [];
+
+  function syncExtensionStatuses(footerData: any): void {
+    try {
+      const statusMap = footerData?.getExtensionStatuses?.();
+      if (statusMap && typeof statusMap.forEach === "function") {
+        const arr: string[] = [];
+        statusMap.forEach((text: string) => { if (text) arr.push(text); });
+        statusesCache = arr;
+      }
+    } catch {}
+  }
+
+  /** 第 1 行（输入框上方 widget）：● status · model · thinking · 扩展状态 | in/out/ctx */
+  /** 文本框内部状态行（下边框之上）：● status · model · thinking · 扩展状态 */
+  /** 文本框内部状态行（下边框之上）：● status · model · provider · 扩展状态，思考等级右对齐 */
+  /** 文本框内部状态行（下边框之上）：● status · model · provider · 扩展状态，think 级别右对齐 */
+  /** 文本框内部状态行：● status · model · provider · 扩展状态，think 级别右对齐；窄屏自动精简 */
+  /**
+   * 文本框内部状态行，按宽度三档渲染：
+   *  - 极窄 (<40)：仅 model … high
+   *  - 窄屏 (40~119)：● READY · model · statuses … high（无 provider、无 think 前缀）
+   *  - 宽屏 (>=120)：● READY · model · provider · statuses … think high（完整）
+   */
+  /**
+   * 文本框状态栏（文本框内部、输入行下方、下边框之上）。
+   * 显示顺序（宽度足够时）：● READY · model · provider · statuses … think high
+   * 信息不足时按固定顺序逐项隐藏（内容自适应）：
+   *   provider → think 前缀 → ● READY → statuses → model → think 级别
+   * 宽度足够时展示全部信息，越藏越少，最后只保留 think 级别。
+   */
+  function renderStatusLine(theme: any, width: number): string {
+    const s = footerState?.activity ?? "ready";
+    const model = footerState?.modelId ?? "-";
+    const provider = footerState?.provider;
+    const think = footerState?.thinkingLevel ?? "-";
+    // 编辑器 theme 是 pi-tui 的 EditorTheme，没有 fg()；颜色统一用 atelier 主题。
+    const color = (name: string, x: string) =>
+      typeof theme?.fg === "function" ? theme.fg(name, x) : x;
+    const muted = (x: string) => color("muted", x);
+    const textColor = (x: string) => color("text", x);
+    const bold = (x: string) => (typeof theme?.bold === "function" ? theme.bold(x) : x);
+
+    const statuses: string[] = [];
+    for (const text of statusesCache) if (text) statuses.push(text);
+    const statusStr = statuses.length > 0 ? muted(statuses.join("  ")) : "";
+    const statusLabel = s === "ready" ? t.status.ready : s === "working" ? t.status.working : t.status.error;
+    const BLUE = "\x1b[38;2;114;211;252m";
+    const RESET = "\x1b[39m";
+
+    // 显示单元（按隐藏顺序排列：越靠前越先被隐藏）
+    const units: Array<{ key: string; render: () => string }> = [];
+    if (provider) units.push({ key: "provider", render: () => muted(provider ?? "") });
+    units.push({ key: "thinkPref", render: () => muted("think") });
+    units.push({ key: "status", render: () => bold(color("syntaxKeyword", `\u25cf ${statusLabel}`)) });
+    if (statuses.length > 0) units.push({ key: "statuses", render: () => statusStr });
+    units.push({ key: "model", render: () => textColor(model) });
+    units.push({ key: "think", render: () => BLUE + think + RESET });
+
+    // 显示顺序（视觉布局）：● READY 最先，model 次之，provider 随后，statuses 靠后
+    // 与隐藏顺序（units 数组次序）相互独立
+    const displayOrder: Record<string, number> = { status: 0, model: 1, provider: 2, statuses: 3 };
+
+    // 从第一个单元开始逐个隐藏（隐藏顺序 = units 数组次序），直到能放下
+    for (let drop = 0; drop < units.length; drop++) {
+      const kept = units.slice(drop);
+      let leftUnits = kept.filter((u) => u.key !== "thinkPref" && u.key !== "think");
+      leftUnits = leftUnits.sort((a, b) => (displayOrder[a.key] ?? 9) - (displayOrder[b.key] ?? 9));
+      const rightUnits = kept.filter((u) => u.key === "thinkPref" || u.key === "think");
+      const left = leftUnits.map((u) => u.render()).join(` ${muted("\u00b7")} `);
+      const right = rightUnits.map((u) => u.render()).join(" ");
+      const gap = width - visibleLen(left) - visibleLen(right);
+      if (gap >= 2) {
+        return truncateToVisible(
+          gap >= 4 ? left + muted(" ".repeat(gap)) + right : left + "  " + right,
+          width,
+        );
+      }
+    }
+    // 极端兜底：只剩 think 级别
+    return truncateToVisible(BLUE + think + RESET, width);
+  }
+
+  /**
+   * 底部状态栏（输入框下方），三级内容自适应：
+   *  1 行：宽度足够时左右同行（右部右对齐）
+   *  2 行：放不下时拆两行，左部一行、右部一行，均靠左
+   *  4 行：2 行时若任一行超宽，再细拆为四行：
+   *       session · dur / cwd / ctx · cache / cost · bal
+   */
+  function renderLine2(theme: any, width: number): string[] {
+    const dim = (x: string) => theme.fg("dim", x);
+    const muted = (x: string) => theme.fg("muted", x);
+    const dur = footerState?.lastRunDurationMs !== undefined ? fmtDuration(footerState.lastRunDurationMs) : "";
+    const sessionName = footerState?.sessionName ?? t.generic.untitled;
+    const cwd = footerState?.cwd ?? "-";
+
+    const ctxWin = footerState?.contextWindow ? fmt(footerState.contextWindow) : "";
+    const ctxPct = footerState?.contextPercent !== null && footerState?.contextPercent !== undefined
+      ? `${footerState.contextPercent.toFixed(1)}%` : "-%";
+    const ac = footerState?.autoCompact === true ? muted(t.compaction.auto)
+      : footerState?.autoCompact === false ? muted(t.compaction.off)
+      : muted(t.compaction.unknown);
+
+    const ch = footerState?.cacheHitPercent !== undefined ? `${footerState.cacheHitPercent.toFixed(1)}%` : "-%";
+    const bal = footerState?.balance;
+
+    const sep = "\u00b7";
+    const ctxNode = ctxWin
+      ? `${dim(t.line1.ctx)} \x1b[38;2;114;211;252m${ctxPct}\x1b[39m ${dim(ctxWin)} ${ac}`
+      : `${dim(t.line1.ctx)} \x1b[38;2;114;211;252m${ctxPct}\x1b[39m ${ac}`;
+    const cacheNode = `${dim(t.line2.cache)} \x1b[38;2;177;140;255m${ch}\x1b[39m`;
+    const costNode = `\x1b[38;2;255;159;67m${costCfg.symbol}${((footerState?.todayCost ?? 0) * costCfg.rate).toFixed(2)}/${costCfg.symbol}${((footerState?.cost ?? 0) * costCfg.rate).toFixed(2)}\x1b[39m`;
+    const balNode = bal && bal !== "UNKNOWN"
+      ? `${dim(t.line2.bal)} \x1b[38;2;187;255;153m${bal}\x1b[39m`
+      : "";
+
+    const leftFull = [dim(sessionName), dim(cwd), ...(dur ? [dim(dur)] : [])].join(` ${dim(sep)} `);
+    const rightItems = [ctxNode, cacheNode, costNode];
+    if (balNode) rightItems.push(balNode);
+    const rightFull = rightItems.join(` ${dim(sep)} `);
+    const v = visibleLen;
+
+    // ① 1 行：左右同行（右部右对齐）
+    const gap = width - v(leftFull) - v(rightFull);
+    if (gap >= 4) {
+      return [truncateToVisible(leftFull + muted(" ".repeat(gap)) + rightFull, width)];
+    }
+
+    // ② 2 行：左部一行、右部一行（均靠左）
+    if (v(leftFull) <= width && v(rightFull) <= width) {
+      return [truncateToVisible(leftFull, width), truncateToVisible(rightFull, width)];
+    }
+
+    // ③ 4 行：细拆为 session·dur / cwd / ctx·cache / cost·bal
+    const row1 = [dim(sessionName), ...(dur ? [dim(dur)] : [])].join(` ${dim(sep)} `);
+    const row2 = dim(cwd);
+    const row3 = [ctxNode, cacheNode].join(` ${dim(sep)} `);
+    const row4 = [costNode, ...(balNode ? [balNode] : [])].join(` ${dim(sep)} `);
+    return [row1, row2, row3, row4].map((l) => truncateToVisible(l, width));
+  }
+
+
+
+
+  class StatusAwareEditor extends CustomEditor {
+    private statusTheme: any;
+    constructor(tui: any, theme: any, keybindings: any, options?: any) {
+      super(tui, theme, keybindings, options);
+      this.statusTheme = theme;
+    }
+    render(width: number): string[] {
+      const lines = super.render(width);
+      if (!Array.isArray(lines) || lines.length === 0) return lines;
+      // 在最后一行（底部边框）之前注入 ● READY 状态行
+      return [...lines.slice(0, -1), "", renderStatusLine(atelierThemeRef ?? this.statusTheme, width), lines[lines.length - 1]];
+    }
+  }
+
+  function installStatusUI(ctx: ExtensionContext): void {
     if (ctx.mode !== "tui") return;
     refreshUsage(ctx);
 
     ctx.ui.setFooter((tui, theme, footerData) => {
       footerTuiRef = tui;
-      const textColor = (t: string) => theme.fg("text", t);
-      const muted = (t: string) => theme.fg("muted", t);
-      const accent = (t: string) => theme.fg("accent", t);
-      const green = (t: string) => theme.fg("toolDiffAdded", t);
-      const dim = (t: string) => theme.fg("dim", t);
-      const bold = (t: string) => theme.bold(t);
-
+      atelierThemeRef ??= theme;
+      syncExtensionStatuses(footerData);
       return {
         render(width: number): string[] {
-          const s = footerState?.activity ?? "ready";
-          const model = footerState?.modelId ?? "-";
-          const think = footerState?.thinkingLevel ?? "-";
-          const inp = fmt(footerState?.input ?? 0);
-          const out = fmt(footerState?.output ?? 0);
-          const ctxWin = footerState?.contextWindow ? fmt(footerState.contextWindow) : "";
-          const ctxPct = footerState?.contextPercent !== null && footerState?.contextPercent !== undefined
-            ? `${footerState.contextPercent.toFixed(1)}%` : "-%";
-          const dir = footerState?.cwd?.split("/").pop() ?? "-";
-          const dur = footerState?.lastRunDurationMs !== undefined ? fmtDuration(footerState.lastRunDurationMs) : "";
-
-          // Auto-compaction
-          const ac = footerState?.autoCompact === true ? muted(t.compaction.auto)
-            : footerState?.autoCompact === false ? muted(t.compaction.off)
-            : muted(t.compaction.unknown);
-
-          // Extension statuses
-          const statuses: string[] = [];
-          try {
-            const statusMap = footerData.getExtensionStatuses();
-            if (statusMap && typeof statusMap.forEach === "function") {
-              statusMap.forEach((text: string) => { if (text) statuses.push(text); });
-            }
-          } catch {}
-          const statusStr = statuses.length > 0 ? muted(statuses.join("  ")) : "";
-
-          // ── Line 1 ──
-          const statusLabel = s === "ready" ? t.status.ready : s === "working" ? t.status.working : t.status.error;
-          // Left:  status(blue+bold) · model(white) · thinking · extension statuses
-          const L1left = [
-            theme.bold(theme.fg("syntaxKeyword", `\u25cf ${statusLabel}`)),
-            textColor(model),
-            theme.italic(muted(think)),
-          ];
-          if (statusStr) L1left.push(statusStr);
-
-          // Right: labels in dim, values colored
-          const L1right = [
-            `${dim(t.line1.in)} ${theme.fg("syntaxKeyword", inp)}`,
-            `${dim(t.line1.out)} [38;2;177;140;255m${out}[39m`,
-            ctxWin ? `${dim(t.line1.ctx)} [38;2;114;211;252m${ctxPct}[39m ${dim(ctxWin)} ${ac}` : `${dim(t.line1.ctx)} [38;2;114;211;252m${ctxPct}[39m ${ac}`,
-          ];
-
-          const l1LeftText = L1left.join(` ${muted("\u00b7")} `);
-          const l1RightText = L1right.join(` ${muted("\u00b7")} `);
-          const l1Gap = width - visibleLen(l1LeftText) - visibleLen(l1RightText);
-          const line1 = l1Gap >= 4
-            ? `${l1LeftText}${muted(" ".repeat(l1Gap))}${l1RightText}`
-            : `${l1LeftText}  ${l1RightText}`;
-
-          // ── Line 2: left = full path + duration, right = read · write · cache% · $cost
-          const L2left = [dim(footerState?.sessionName ?? t.generic.untitled), dim(footerState?.cwd ?? "-")];
-          if (dur) L2left.push(dim(dur));
-
-          const ch = footerState?.cacheHitPercent !== undefined ? `${Math.round(footerState.cacheHitPercent)}%` : "-%";
-          // Balance display
-          const bal = footerState?.balance;
-
-          const L2right = [
-            `${dim(t.line2.cache)} [38;2;243;169;165m${ch}[39m`,
-            `[38;2;255;159;67m${costCfg.symbol}${((footerState?.todayCost ?? 0) * costCfg.rate).toFixed(costCfg.decimals)}/${costCfg.symbol}${((footerState?.cost ?? 0) * costCfg.rate).toFixed(2)}[39m`,
-            bal && bal !== "UNKNOWN" ? `${dim(t.line2.bal)} [38;2;187;255;153m${bal}[39m` : `${dim(t.line2.bal)} UNKNOWN`,
-          ];
-
-          const l2LeftText = L2left.join(` ${muted("\u00b7")} `);
-          const l2RightText = L2right.join(` ${muted("\u00b7")} `);
-          const l2Gap = width - visibleLen(l2LeftText) - visibleLen(l2RightText);
-          const line2 = l2Gap >= 4
-            ? `${l2LeftText}${muted(" ".repeat(l2Gap))}${l2RightText}`
-            : `${l2LeftText}  ${l2RightText}`;
-
-          return [truncateToVisible(line1, width), truncateToVisible(line2, width)];
+          syncExtensionStatuses(footerData);
+          return renderLine2(theme, width);
         },
         invalidate(): void {},
       };
     });
+
+    // 替换编辑器：在文本框内部（输入行下方、下边框上方）注入“文本框状态栏”行
+    ctx.ui.setEditorComponent((tui, theme, keybindings) =>
+      new StatusAwareEditor(tui, theme, keybindings),
+    );
   }
 
   // ---- commands ----
@@ -557,7 +628,7 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
         sessionName: ctx.sessionManager.getSessionName() || t.generic.untitled,
       };
       refreshUsage(ctx);
-      if (ctx.mode === "tui") installFooter(ctx);
+      if (ctx.mode === "tui") installStatusUI(ctx);
     } catch (e) {
       console.error("[wj-status] session_start error:", e);
     }
