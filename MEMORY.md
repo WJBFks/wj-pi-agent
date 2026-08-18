@@ -106,10 +106,12 @@
 
 ## 六、wj-scheduler 扩展
 
-- `extensions/wj-scheduler/extensions/index.js`（JS 实现，自包含 cron 解析）
+- `extensions/wj-scheduler/extensions/index.ts`（**TS 实现**，2026-08-18 由 JS 重构；自包含 cron 解析；入口 `package.json pi.extensions → ./extensions/index.ts`）
 - 数据路径：session_start 时 `data/wj-scheduler/<sessionId>/tasks.json` + `scheduler.lock`（**符合 data/[name]/[session] 规范**）
 - **不**在 settings.json packages 中，靠扩展自动发现加载（已验证）
 - 提供 `/wj-cron` 命令（status/list/get/run/enable/disable/delete）与 LLM 工具（wj_scheduler_create/list/get/update/delete/run_now）
+- **已移除 setStatus 状态推送**（`wj-scheduler: active/idle` 不再显示在状态栏）
+- **重构要点**：新增 Task/TaskInput/HistoryEntry/SchedulerStatus 类型 + 类字段类型 + 方法签名；`import type { ExtensionAPI }`；删除零引用的死代码（defineTool/TString/TBoolean/TObject）；工具注册用本地 `register` 包装（any 上下文，规避 TypeBox 类型噪音）；`import type` 在运行时被剥离，无新增依赖
 - 锁实现：PerProcessLock（每个 session 独立锁文件，PID 存活检查）
 - session 目录为空的属正常（session_start 时 mkdirSync 创建）
 

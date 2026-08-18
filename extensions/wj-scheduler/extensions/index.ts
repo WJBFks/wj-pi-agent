@@ -17,24 +17,81 @@
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ──────────────────────────────────────
 // 常量
 // ──────────────────────────────────────
 const SETTINGS_KEY = "wj-scheduler";
 
+// ──────────────────────────────────────
+// 类型定义
+// ──────────────────────────────────────
+type TaskType = "cron" | "once" | "interval";
+
+interface HistoryEntry {
+  id: string;
+  status: string;
+  createdAt: string;
+  message?: string;
+  [key: string]: unknown;
+}
+
+interface Task {
+  id: string;
+  type: TaskType;
+  schedule: string;
+  intervalSeconds: number;
+  prompt: string;
+  name?: string;
+  description?: string;
+  model?: string;
+  sessionId?: string;
+  toolPolicyProfile?: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  runCount: number;
+  runHistory: HistoryEntry[];
+  nextRunAt?: string;
+  lastRunAt?: string;
+  lastStatus?: "running" | "success" | "error";
+  lastError?: string;
+  timeoutMs?: number;
+}
+
+interface TaskInput {
+  type?: TaskType;
+  schedule?: string;
+  prompt?: string;
+  name?: string;
+  description?: string;
+  model?: string;
+  sessionId?: string;
+  toolPolicyProfile?: string;
+  enabled?: boolean;
+}
+
+interface SchedulerStatus {
+  active: boolean;
+  pid: number;
+  taskCount: number;
+  timerCount: number;
+  intervalCount: number;
+  runningCount: number;
+}
+
 /**
  * 解析用户主目录
  */
-function resolveHome() {
+function resolveHome(): string {
   return process.env.HOME || process.env.USERPROFILE || "/home/jiaxingwang";
 }
 
 /**
  * 获取 PI agent 数据目录
  */
-function getAgentDataDir() {
+function getAgentDataDir(): string {
   return path.join(resolveHome(), ".pi", "agent", "data");
 }
 
@@ -47,7 +104,7 @@ function getAgentDataDir() {
  * 简易 cron 解析 — 计算下一次执行时间
  * 支持标准 5 字段 cron 表达式
  */
-function computeNextCronRun(expression) {
+function computeNextCronRun(expression: string): string | undefined {
   const fields = expression.trim().split(/\s+/);
   if (fields.length !== 5) return undefined;
 
@@ -73,7 +130,7 @@ function computeNextCronRun(expression) {
   return undefined;
 }
 
-function matchField(value, field, min, max) {
+function matchField(value: number, field: string, min: number, max: number): boolean {
   if (field === "*") return true;
 
   // 逗号分隔列表
@@ -104,13 +161,16 @@ function matchField(value, field, min, max) {
 // ──────────────────────────────────────
 
 class PerProcessLock {
-  constructor(lockDir) {
+  private path: string;
+  private acquired: boolean;
+
+  constructor(lockDir: string) {
     // 锁文件放在 session 隔离目录内，不同 session 不冲突
     this.path = path.join(lockDir, "scheduler.lock");
     this.acquired = false;
   }
 
-  acquire() {
+  acquire(): boolean {
     mkdirSync(path.dirname(this.path), { recursive: true });
     try {
       writeFileSync(this.path, String(process.pid), { flag: "wx" });
@@ -137,7 +197,7 @@ class PerProcessLock {
     }
   }
 
-  release() {
+  release(): void {
     if (!this.acquired) return;
     try {
       const pid = Number(readFileSync(this.path, "utf8").trim());
@@ -146,9 +206,9 @@ class PerProcessLock {
     this.acquired = false;
   }
 
-  isAcquired() { return this.acquired; }
+  isAcquired(): boolean { return this.acquired; }
 
-  #isAlive(pid) {
+  #isAlive(pid: number): boolean {
     try { process.kill(pid, 0); return true; }
     catch { return false; }
   }
@@ -159,29 +219,33 @@ class PerProcessLock {
 // ──────────────────────────────────────
 
 class PerProcessTaskStore {
-  constructor(filePath) {
+  private filePath: string;
+  private cache: Map<string, Task> | null;
+  private writeQueue: Promise<unknown>;
+
+  constructor(filePath: string) {
     this.filePath = filePath;
     this.cache = null;
     this.writeQueue = Promise.resolve();
   }
 
-  async list() {
+  async list(): Promise<Task[]> {
     await this.#load();
     return Array.from(this.cache.values());
   }
 
-  async get(taskId) {
+  async get(taskId: string): Promise<Task | undefined> {
     await this.#load();
     return this.cache.get(taskId);
   }
 
-  async create(task) {
+  async create(task: Task): Promise<Task> {
     const normalized = this.#normalize(task);
     await this.#mutate(() => this.cache.set(normalized.id, normalized));
     return normalized;
   }
 
-  async update(taskId, task) {
+  async update(taskId: string, task: Task): Promise<Task | undefined> {
     const normalized = this.#normalize(task);
     const ok = await this.#mutate(() => {
       if (!this.cache.has(taskId)) return false;
@@ -191,11 +255,11 @@ class PerProcessTaskStore {
     return ok ? normalized : undefined;
   }
 
-  async delete(taskId) {
+  async delete(taskId: string): Promise<boolean> {
     return this.#mutate(() => this.cache.delete(taskId));
   }
 
-  async #load() {
+  async #load(): Promise<void> {
     if (this.cache) return;
     this.cache = new Map();
     try {
@@ -210,12 +274,12 @@ class PerProcessTaskStore {
     } catch {}
   }
 
-  async #save() {
+  async #save(): Promise<void> {
     mkdirSync(path.dirname(this.filePath), { recursive: true });
     writeFileSync(this.filePath, JSON.stringify(Array.from(this.cache.values()), null, 2), "utf-8");
   }
 
-  async #mutate(fn) {
+  async #mutate<T>(fn: () => T): Promise<T> {
     const pending = this.writeQueue.then(async () => {
       await this.#load();
       const result = fn();
@@ -226,7 +290,7 @@ class PerProcessTaskStore {
     return await pending;
   }
 
-  #normalize(raw) {
+  #normalize(raw: any): Task {
     return {
       id: raw.id,
       type: raw.type ?? "interval",
@@ -258,7 +322,16 @@ class PerProcessTaskStore {
 // ──────────────────────────────────────
 
 class WJScheduler {
-  constructor(opts) {
+  private store: PerProcessTaskStore;
+  private lock: PerProcessLock;
+  private runner: (task: Task) => Promise<void>;
+  private timers: Map<string, ReturnType<typeof setTimeout>>;
+  private intervals: Map<string, ReturnType<typeof setInterval>>;
+  private active: boolean;
+  private runningIds: Set<string>;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null;
+
+  constructor(opts: { store: PerProcessTaskStore; lock: PerProcessLock; runner: (task: Task) => Promise<void> }) {
     this.store = opts.store;
     this.lock = opts.lock;
     this.runner = opts.runner;
@@ -269,10 +342,10 @@ class WJScheduler {
     this.heartbeatTimer = null;
   }
 
-  async list() { return this.store.list(); }
-  async get(id) { return this.store.get(id); }
+  async list(): Promise<Task[]> { return this.store.list(); }
+  async get(id: string): Promise<Task | undefined> { return this.store.get(id); }
 
-  async status() {
+  async status(): Promise<SchedulerStatus> {
     const tasks = await this.store.list();
     return {
       active: this.active,
@@ -284,9 +357,9 @@ class WJScheduler {
     };
   }
 
-  isActive() { return this.active; }
+  isActive(): boolean { return this.active; }
 
-  async create(input) {
+  async create(input: TaskInput): Promise<Task> {
     const now = new Date().toISOString();
     const id = randomUUID();
     const def = this.#resolveSchedule(input);
@@ -312,11 +385,11 @@ class WJScheduler {
     return created;
   }
 
-  async update(taskId, input) {
+  async update(taskId: string, input: TaskInput): Promise<Task | undefined> {
     const existing = await this.store.get(taskId);
     if (!existing) return undefined;
 
-    const next = { ...existing, ...input, updatedAt: new Date().toISOString() };
+    const next = { ...existing, ...input, updatedAt: new Date().toISOString() } as Task;
 
     // 处理 enabled 状态变更历史
     if (input.enabled !== undefined && input.enabled !== existing.enabled) {
@@ -351,19 +424,19 @@ class WJScheduler {
     return updated;
   }
 
-  async delete(taskId) {
+  async delete(taskId: string): Promise<boolean> {
     this.#unschedule(taskId);
     return this.store.delete(taskId);
   }
 
-  async runNow(taskId) {
+  async runNow(taskId: string): Promise<Task | undefined> {
     const task = await this.store.get(taskId);
     if (!task) return undefined;
     this.#execute(taskId).catch(() => {});
     return task;
   }
 
-  async start() {
+  async start(): Promise<void> {
     if (this.active) return;
     if (!this.lock.acquire()) {
       console.warn("[wj-scheduler] 锁获取失败");
@@ -391,7 +464,7 @@ class WJScheduler {
     }
   }
 
-  async stop() {
+  async stop(): Promise<void> {
     for (const [id] of this.timers) this.#unschedule(id);
     this.active = false;
     if (this.heartbeatTimer) {
@@ -403,7 +476,7 @@ class WJScheduler {
 
   // ── 内部方法 ──
 
-  #resolveSchedule(input) {
+  #resolveSchedule(input: TaskInput): { type: TaskType; schedule: string; intervalSeconds: number } {
     if (input.type === "interval") {
       const sec = this.#parseInterval(input.schedule);
       if (!sec) throw new Error(`无效的间隔表达式: ${input.schedule}`);
@@ -418,14 +491,14 @@ class WJScheduler {
     return { type: "cron", schedule: input.schedule, intervalSeconds: 0 };
   }
 
-  #parseInterval(v) {
+  #parseInterval(v: string): number | undefined {
     const m = v.trim().match(/^(\d+)(s|m|h|d)$/);
     if (!m) return undefined;
     const mults = { s: 1, m: 60, h: 3600, d: 86400 };
     return Number(m[1]) * (mults[m[2]] ?? 1);
   }
 
-  #resolveOnce(v) {
+  #resolveOnce(v: string): string {
     const rel = v.trim().match(/^\+(\d+)(s|m|h|d)$/);
     if (rel) {
       const mults = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
@@ -437,7 +510,7 @@ class WJScheduler {
     return d.toISOString();
   }
 
-  #withNextRun(task) {
+  #withNextRun(task: Task): Task {
     const r = { ...task };
     if (!r.enabled) { delete r.nextRunAt; return r; }
 
@@ -455,7 +528,7 @@ class WJScheduler {
     return r;
   }
 
-  #schedule(task) {
+  #schedule(task: Task): void {
     this.#unschedule(task.id);
     if (!this.active || !task.enabled) return;
 
@@ -482,7 +555,7 @@ class WJScheduler {
     this.#scheduleNextCron(task);
   }
 
-  #scheduleNextCron(task) {
+  #scheduleNextCron(task: Task): void {
     const next = computeNextCronRun(task.schedule);
     if (!next) return;
     const delay = new Date(next).getTime() - Date.now();
@@ -500,7 +573,7 @@ class WJScheduler {
     this.timers.set(task.id, timer);
   }
 
-  async #execute(taskId) {
+  async #execute(taskId: string): Promise<void> {
     if (!this.active || this.runningIds.has(taskId)) return;
     const task = await this.store.get(taskId);
     if (!task?.enabled) return;
@@ -553,14 +626,14 @@ class WJScheduler {
     }
   }
 
-  #unschedule(taskId) {
+  #unschedule(taskId: string): void {
     const t = this.timers.get(taskId);
     if (t) { clearTimeout(t); this.timers.delete(taskId); }
     const i = this.intervals.get(taskId);
     if (i) { clearInterval(i); this.intervals.delete(taskId); }
   }
 
-  async #markError(taskId, error) {
+  async #markError(taskId: string, error: string): Promise<void> {
     const task = await this.store.get(taskId);
     if (!task) return;
     const updated = {
@@ -575,65 +648,31 @@ class WJScheduler {
     await this.store.update(taskId, updated);
   }
 
-  #startHeartbeat() {
-    this.heartbeatTimer = setInterval(() => {
+  #startHeartbeat(): void {
+    const t = setInterval(() => {
       if (!this.lock.isAcquired()) {
         this.stop().catch(() => {});
       }
     }, 30000);
-    this.heartbeatTimer.unref();
+    t.unref();
+    this.heartbeatTimer = t;
   }
 
-  #histEntry(status, message, extra) {
+  #histEntry(status: string, message: string, extra?: Record<string, unknown>): HistoryEntry {
     return { id: randomUUID(), status, createdAt: new Date().toISOString(), message, ...extra };
   }
 
-  #updateHistory(history, entryId, patch) {
+  #updateHistory(history: HistoryEntry[], entryId: string, patch: Partial<HistoryEntry>): HistoryEntry[] {
     return history.map((e) => (e.id === entryId ? { ...e, ...patch } : e)).slice(-25);
   }
-}
-
-// ──────────────────────────────────────
-// 工具注册辅助
-// ──────────────────────────────────────
-
-function defineTool(name, label, description, params, executeFn) {
-  return {
-    name,
-    label,
-    description,
-    promptSnippet: description,
-    parameters: params,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      try {
-        const result = await executeFn(params, ctx);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: undefined };
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return { content: [{ type: "text", text: `错误: ${msg}` }], details: undefined };
-      }
-    },
-  };
-}
-
-function TString(desc, opts = {}) {
-  return { type: "string", description: desc, ...opts };
-}
-
-function TBoolean(desc) {
-  return { type: "boolean", description: desc };
-}
-
-function TObject(props, required = []) {
-  return { type: "object", properties: props, required };
 }
 
 // ──────────────────────────────────────
 // 扩展入口
 // ──────────────────────────────────────
 
-export default function wjSchedulerExtension(pi) {
-  let scheduler;
+export default function wjSchedulerExtension(pi: ExtensionAPI) {
+  let scheduler: WJScheduler | undefined;
   let ownsScheduler = false;
 
   pi.on("session_start", async (_event, ctx) => {
@@ -779,7 +818,7 @@ export default function wjSchedulerExtension(pi) {
 /**
  * 构建结构化的定时任务触发消息
  */
-function buildTriggerMessage(task) {
+function buildTriggerMessage(task: Task): string {
   const now = new Date();
   const triggerTime = now.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
   const typeLabel = { once: "一次性", interval: "固定间隔", cron: "周期性" }[task.type] ?? task.type;
@@ -846,13 +885,15 @@ function buildTriggerMessage(task) {
   ].filter(Boolean).join("\n");
 }
 
-function registerTools(pi, scheduler) {
+function registerTools(pi: ExtensionAPI, scheduler: WJScheduler) {
+  // 本地注册封装：any 上下文让工具 schema 字面量零类型噪音，运行时由 pi 解析 JSON Schema
+  const register = (tool: any): void => { pi.registerTool(tool); };
   // 使用 TypeBox 兼容的 schema 格式
   const typeSchema = () => ({ type: "string", enum: ["cron", "once", "interval"] });
   const stringSchema = (desc) => ({ type: "string", description: desc });
   const booleanSchema = (desc) => ({ type: "boolean", description: desc });
 
-  pi.registerTool({
+  register({
     name: "wj_scheduler_create",
     label: "WJ Scheduler",
     description: "创建一个定时任务。支持 cron(周期性)、once(一次性)、interval(固定间隔)三种类型。",
@@ -869,7 +910,7 @@ function registerTools(pi, scheduler) {
       },
       required: ["type", "schedule", "prompt"],
     },
-    execute: async (_toolCallId, params) => {
+    execute: async (_toolCallId: string, params: any) => {
       const task = await scheduler.create({
         type: params.type,
         schedule: params.schedule,
@@ -893,7 +934,7 @@ function registerTools(pi, scheduler) {
     },
   });
 
-  pi.registerTool({
+  register({
     name: "wj_scheduler_list",
     label: "WJ Scheduler",
     description: "列出所有定时任务及其状态和下次执行时间。",
@@ -916,7 +957,7 @@ function registerTools(pi, scheduler) {
     },
   });
 
-  pi.registerTool({
+  register({
     name: "wj_scheduler_get",
     label: "WJ Scheduler",
     description: "查看定时任务的详细信息，包括调度配置和执行历史。",
@@ -926,14 +967,14 @@ function registerTools(pi, scheduler) {
       properties: { taskId: { type: "string", description: "任务 ID" } },
       required: ["taskId"],
     },
-    execute: async (_toolCallId, params) => {
+    execute: async (_toolCallId: string, params: any) => {
       const task = await scheduler.get(params.taskId);
       if (!task) return { content: [{ type: "text", text: `任务未找到: ${params.taskId}` }], details: undefined };
       return { content: [{ type: "text", text: JSON.stringify(task, null, 2) }], details: undefined };
     },
   });
 
-  pi.registerTool({
+  register({
     name: "wj_scheduler_update",
     label: "WJ Scheduler",
     description: "修改定时任务。可改调度、prompt、名称、启用/禁用。",
@@ -950,7 +991,7 @@ function registerTools(pi, scheduler) {
       },
       required: ["taskId"],
     },
-    execute: async (_toolCallId, params) => {
+    execute: async (_toolCallId: string, params: any) => {
       const { taskId, ...updates } = params;
       const task = await scheduler.update(taskId, updates);
       if (!task) return { content: [{ type: "text", text: `任务未找到: ${taskId}` }], details: undefined };
@@ -958,7 +999,7 @@ function registerTools(pi, scheduler) {
     },
   });
 
-  pi.registerTool({
+  register({
     name: "wj_scheduler_delete",
     label: "WJ Scheduler",
     description: "删除一个定时任务。",
@@ -968,7 +1009,7 @@ function registerTools(pi, scheduler) {
       properties: { taskId: { type: "string", description: "任务 ID" } },
       required: ["taskId"],
     },
-    execute: async (_toolCallId, params) => {
+    execute: async (_toolCallId: string, params: any) => {
       const ok = await scheduler.delete(params.taskId);
       return {
         content: [{ type: "text", text: ok ? `已删除任务: ${params.taskId}` : `任务未找到: ${params.taskId}` }],
@@ -977,7 +1018,7 @@ function registerTools(pi, scheduler) {
     },
   });
 
-  pi.registerTool({
+  register({
     name: "wj_scheduler_run_now",
     label: "WJ Scheduler",
     description: "忽略原有调度计划，立即执行一个定时任务。",
