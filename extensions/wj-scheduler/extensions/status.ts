@@ -24,7 +24,9 @@ interface TaskLike {
   name?: string;
   enabled?: boolean;
   intervalSeconds?: number;
+  schedule?: string;
   nextRunAt?: string;
+  lastRunAt?: string;
 }
 
 /** status.ts 依赖的最小调度器结构（WJScheduler 天然满足） */
@@ -42,21 +44,38 @@ function formatInterval(secs?: number): string {
 /** 任务类型的短标签 */
 function typeLabel(t: TaskLike): string {
   if (t.type === "once") return "一次性";
-  if (t.type === "cron") return "周期";
-  return formatInterval(t.intervalSeconds);
+  if (t.type === "interval") return "循环";
+  return "周期";
 }
 
-/** ISO 时间 → 本地 HH:MM；无则返回「待首跑」（任务首次执行前 nextRunAt 尚未写入） */
+/** 循环任务的间隔描述（cron 从分钟字段推导常见粒度，复杂表达式不推导） */
+function loopInterval(t: TaskLike): string {
+  if (t.type === "interval") return formatInterval(t.intervalSeconds);
+  if (t.type === "cron") {
+    const f = t.schedule?.trim().split(/\s+/) ?? [];
+    if (f.length !== 5) return "";
+    const min = f[0];
+    const step = min.match(/^\*\/(\d+)$/);
+    if (step) return `每${step[1]}分`;
+    if (min === "*") return "每分钟";
+    if (min === "0" && f[1] === "*") return "每小时";
+    return "";
+  }
+  return "";
+}
+
+/** ISO 时间 → YYYY/MM/DD-HH:mm:ss（本地时区）；无则返回「待首跑」 */
 function timeLabel(iso?: string): string {
-  return iso
-    ? new Date(iso).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })
-    : "待首跑";
+  if (!iso) return "待首跑";
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())}-${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 /**
- * 构建要展示的任务行（纯文本，无 ANSI；排序交给 wj-status 或调用方样式化）：
+ * 构建要展示的任务行（纯文本，无 ANSI）：
  * 仅保留 enabled 任务，按下次执行时间升序（无 nextRunAt 的排最后）。
- * 每行格式：⏰ 名称(间隔) · 下次 HH:MM
+ * 行格式：⏰ 标题 · 定时类型 · 间隔(仅循环任务) · 下次YYYY/MM/DD-HH:mm:ss · 上次.../待首跑
  */
 export function buildTaskLines(list: TaskLike[]): string[] {
   return list
@@ -66,7 +85,13 @@ export function buildTaskLines(list: TaskLike[]): string[] {
       const tb = b.nextRunAt ? new Date(b.nextRunAt).getTime() : Number.MAX_SAFE_INTEGER;
       return ta - tb;
     })
-    .map((t) => `⏰ ${t.name ?? "(未命名)"}(${typeLabel(t)}) · 下次 ${timeLabel(t.nextRunAt)}`);
+    .map((t) => {
+      const parts = [`⏰ ${t.name ?? "(未命名)"}`, typeLabel(t)];
+      const interval = loopInterval(t);
+      if (interval) parts.push(interval);
+      parts.push(`下次${timeLabel(t.nextRunAt)}`, `上次${timeLabel(t.lastRunAt)}`);
+      return parts.join(" · ");
+    });
 }
 
 /**
