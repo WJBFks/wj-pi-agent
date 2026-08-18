@@ -29,11 +29,19 @@ function getTodayStr(): string {
 function loadCostTracking(initialCost: number = 0): CostTracking {
   try {
     if (existsSync(COST_TRACKING_FILE)) {
-      return JSON.parse(readFileSync(COST_TRACKING_FILE, "utf-8"));
+      const raw = JSON.parse(readFileSync(COST_TRACKING_FILE, "utf-8"));
+      // Sanity: reject corrupted/incomplete records instead of silently resetting
+      if (raw && typeof raw.lastMidnightCost === "number" && typeof raw.lastCheckDate === "string") {
+        return raw;
+      }
     }
   } catch {}
-  // New file: treat existing cost as pre-tracking baseline
-  return { lastMidnightCost: initialCost, lastCheckDate: getTodayStr() };
+  // New file: treat existing cost as pre-tracking baseline and PERSIST it now.
+  // Without this, every call would return baseline = current cost, so
+  // todayCost (= cost - baseline) would always be 0.
+  const tracking: CostTracking = { lastMidnightCost: initialCost, lastCheckDate: getTodayStr() };
+  saveCostTracking(tracking);
+  return tracking;
 }
 
 function saveCostTracking(tracking: CostTracking): void {
@@ -372,7 +380,9 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
       tracking.lastCheckDate = todayStr;
       saveCostTracking(tracking);
     }
-    const todayCost = cost - tracking.lastMidnightCost;
+    // Guard against negative values (e.g. switching to a fresh session whose
+    // accumulated cost is lower than today's baseline).
+    const todayCost = Math.max(0, cost - tracking.lastMidnightCost);
 
     footerState = {
       ...footerState,

@@ -7,7 +7,6 @@
     "npm:pi-web-access",
     "npm:pi-subagents",
     "npm:@juicesharp/rpiv-ask-user-question",
-    "./extensions/wj-status",
     "npm:@plannotator/pi-extension"
   ],
   "defaultProvider": "opencode-go",
