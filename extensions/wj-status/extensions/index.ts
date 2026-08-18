@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ExtensionAPI, type ExtensionContext, CustomEditor, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -15,7 +15,8 @@ const _dirname = dirname(fileURLToPath(import.meta.url));
 const EXT_DIR = join(_dirname, "..");
 
 // Cost tracking (todayCost resets at midnight)
-const COST_TRACKING_FILE = join(EXT_DIR, "cost-tracking.json");
+// 会话级数据：data/wj-status/<sessionId>/cost-tracking.json（session_start 时设置）
+let COST_TRACKING_FILE = join(EXT_DIR, "cost-tracking.json");
 
 interface CostTracking {
   lastMidnightCost: number;
@@ -47,6 +48,7 @@ function loadCostTracking(initialCost: number = 0): CostTracking {
 
 function saveCostTracking(tracking: CostTracking): void {
   try {
+    mkdirSync(dirname(COST_TRACKING_FILE), { recursive: true });
     writeFileSync(COST_TRACKING_FILE, JSON.stringify(tracking, null, 2), "utf-8");
   } catch {}
 }
@@ -212,7 +214,8 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
     return getBalance(provider, apiKey);
   }
 
-  const CACHE_FILE = join(EXT_DIR, "balance-cache.json");
+  // 全局数据（余额与 provider/key 绑定，不随会话变化）：data/wj-status/balance-cache.json
+  const CACHE_FILE = join(getAgentDir(), "data", "wj-status", "balance-cache.json");
 
   function readBalanceCache(provider: string): { balance: string | null; timestamp: number } {
     try {
@@ -232,6 +235,7 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
         try { all = JSON.parse(readFileSync(CACHE_FILE, "utf-8")); } catch {}
       }
       all[provider] = { balance, timestamp: Date.now() };
+      mkdirSync(dirname(CACHE_FILE), { recursive: true });
       writeFileSync(CACHE_FILE, JSON.stringify(all, null, 2), "utf-8");
     } catch {}
   }
@@ -614,6 +618,11 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
           ctx.isProjectTrusted() ? ctx.cwd : getAgentDir(),
         ).getCompactionSettings().enabled;
       } catch {}
+      // 会话级成本基线：data/wj-status/<sessionId>/cost-tracking.json
+      const sid = ctx.sessionManager.getSessionId();
+      const costSessionDir = join(getAgentDir(), "data", "wj-status", sid ?? Date.now().toString());
+      mkdirSync(costSessionDir, { recursive: true });
+      COST_TRACKING_FILE = join(costSessionDir, "cost-tracking.json");
       footerState = {
         activity: "ready",
         modelId: undefined,

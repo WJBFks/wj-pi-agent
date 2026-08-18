@@ -29,15 +29,22 @@
 
 ## 三、数据存放规范（重要）
 
-**自动生成的运行时数据与临时文件**必须放在 `data/<name>/<session>/` 下：
+**自动生成的运行时数据**必须先按是否与会话相关分类：
+
+- **会话级数据**（与某个会话绑定，如任务文件、会话成本基线）→ `data/<name>/<session>/`
+- **全局数据**（与 provider/key 等全局维度绑定、不随会话变化的缓存，如余额缓存）→ `data/<name>/`
+
+其中：
 
 - `<name>`：产生数据的插件/功能名（如 `wj-scheduler`、`wj-status`）
 - `<session>`：关联的会话 ID（UUID）
-- 示例：`data/wj-scheduler/01a00da6-fd9b-74fa-ad77-3ebfcf4f9cb1/tasks.json`
+- 示例：
+  - `data/wj-scheduler/01a00da6-fd9b-74fa-ad77-3ebfcf4f9cb1/tasks.json`（会话级）
+  - `data/wj-status/balance-cache.json`（全局缓存）
+  - `data/wj-status/01a00da6-fd9b-74fa-ad77-3ebfcf4f9cb1/cost-tracking.json`（会话级）
 
-**插件配置数据**（插件维护或手工维护的配置，如 `balance-cache.json`、
-`cost-tracking.json`、`config.json`、`i18n/`）则**保留在插件自己的目录**下，
-不属于本条规范约束对象。
+**插件配置数据**（插件维护或手工维护的配置，如 `config.json`、`cost.json`、`i18n/`）
+则**保留在插件自己的目录**下，不属于本条规范约束对象。
 
 禁止事项：
 
