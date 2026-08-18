@@ -40,3 +40,6 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+# 旧版 wj-status 数据文件位置（已迁移至 data/wj-status/，旧进程停止前可能残留写入）
+extensions/wj-status/balance-cache.json
+extensions/wj-status/cost-tracking.json
