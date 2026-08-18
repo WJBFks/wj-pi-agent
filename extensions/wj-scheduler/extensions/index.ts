@@ -400,6 +400,8 @@ class WJScheduler {
         await this.store.update(task.id, fixed).catch(() => {});
         this.#schedule(fixed);
       } else {
+        // interval 追赶：错过间隔（上次运行/创建 + 间隔 ≤ 现在）则立即补执行一次
+        await this.#maybeCatchUpInterval(task);
         this.#schedule(this.#withNextRun(task));
       }
     }
@@ -587,6 +589,22 @@ class WJScheduler {
     };
     delete updated.nextRunAt;
     await this.store.update(taskId, updated);
+  }
+
+  /**
+   * interval 任务追赶（catch-up）：
+   * 重启/恢复后，若已超过「上次运行（或创建）+ 间隔」而期间未曾执行，则立即补执行一次。
+   * 基准：有 lastRunAt 用 lastRunAt；从未执行过则用 createdAt（创建时间 = 首个周期起点）。
+   */
+  async #maybeCatchUpInterval(task: Task): Promise<void> {
+    if (task.type !== "interval" || !task.enabled) return;
+    const intervalMs = (task.intervalSeconds ?? 60) * 1000;
+    const base = task.lastRunAt
+      ? new Date(task.lastRunAt).getTime()
+      : new Date(task.createdAt).getTime();
+    if (!Number.isNaN(base) && Date.now() >= base + intervalMs) {
+      await this.#execute(task.id);
+    }
   }
 
   #startHeartbeat(): void {
