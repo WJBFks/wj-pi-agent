@@ -80,7 +80,9 @@ function timeLabel(iso?: string): string | undefined {
  * 优先用 store 里的 nextRunAt；缺失时按类型实时估算（新任务首次执行前即显示真实时间）。
  */
 function effectiveNextRun(t: TaskLike): string | undefined {
-  if (t.nextRunAt) return t.nextRunAt;
+  // 已过期（错过）的 nextRunAt 不采用：直接跳过该执行点，改算下一个未来时刻
+  const stored = t.nextRunAt ? new Date(t.nextRunAt).getTime() : NaN;
+  if (!Number.isNaN(stored) && stored > Date.now()) return t.nextRunAt;
   if (t.type === "interval") {
     return new Date(Date.now() + (t.intervalSeconds ?? 60) * 1000).toISOString();
   }
