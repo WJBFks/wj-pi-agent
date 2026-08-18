@@ -18,6 +18,7 @@ import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { installSchedulerStatus } from "./status.ts";
 
 // ──────────────────────────────────────
 // 常量
@@ -674,6 +675,7 @@ class WJScheduler {
 export default function wjSchedulerExtension(pi: ExtensionAPI) {
   let scheduler: WJScheduler | undefined;
   let ownsScheduler = false;
+  let statusDispose: { dispose(): void } | undefined;
 
   pi.on("session_start", async (_event, ctx) => {
     try {
@@ -698,6 +700,9 @@ export default function wjSchedulerExtension(pi: ExtensionAPI) {
       scheduler = instance;
       ownsScheduler = true;
 
+      // 底部状态栏展示（写入共享桥，wj-status footer 追加显示）
+      statusDispose = installSchedulerStatus(scheduler);
+
       // 注册 LLM 工具
       registerTools(pi, scheduler);
     } catch (e) {
@@ -709,6 +714,8 @@ export default function wjSchedulerExtension(pi: ExtensionAPI) {
     if (ownsScheduler && scheduler) {
       await scheduler.stop();
     }
+    statusDispose?.dispose();
+    statusDispose = undefined;
     scheduler = undefined;
     ownsScheduler = false;
   });

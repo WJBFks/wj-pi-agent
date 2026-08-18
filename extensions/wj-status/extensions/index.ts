@@ -521,15 +521,23 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
     const rightFull = rightItems.join(` ${dim(sep)} `);
     const v = visibleLen;
 
+    // 扩展行（共享桥）：wj-scheduler 等扩展发布的任务状态行，追加在本栏下方
+    const bridgeExtra = (globalThis as Record<string, unknown>)["__wj_scheduler_footer_lines"];
+    const extras: string[] =
+      Array.isArray(bridgeExtra) && bridgeExtra.length > 0
+        ? bridgeExtra.map((s) => dim(String(s)))
+        : [];
+    const withExtras = (rows: string[]) => [...rows.map((r) => truncateToVisible(r, width)), ...extras];
+
     // ① 1 行：左右同行（右部右对齐）
     const gap = width - v(leftFull) - v(rightFull);
     if (gap >= 4) {
-      return [truncateToVisible(leftFull + muted(" ".repeat(gap)) + rightFull, width)];
+      return withExtras([truncateToVisible(leftFull + muted(" ".repeat(gap)) + rightFull, width)]);
     }
 
     // ② 2 行：左部一行、右部一行（均靠左）
     if (v(leftFull) <= width && v(rightFull) <= width) {
-      return [truncateToVisible(leftFull, width), truncateToVisible(rightFull, width)];
+      return withExtras([truncateToVisible(leftFull, width), truncateToVisible(rightFull, width)]);
     }
 
     // ③ 4 行：细拆为 session·dur / cwd / ctx·cache / cost·bal
@@ -537,7 +545,7 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
     const row2 = dim(cwd);
     const row3 = [ctxNode, cacheNode].join(` ${dim(sep)} `);
     const row4 = [costNode, ...(balNode ? [balNode] : [])].join(` ${dim(sep)} `);
-    return [row1, row2, row3, row4].map((l) => truncateToVisible(l, width));
+    return withExtras([row1, row2, row3, row4].map((l) => truncateToVisible(l, width)));
   }
 
 

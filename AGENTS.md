@@ -27,6 +27,16 @@
 | `SYSTEM.md` `settings.json` `tools.json` | 配置 | 框架级配置 |
 | `auth.json` `models-store.json` `trust.json` | 敏感 | 凭据与本机状态，禁止改动/提交 |
 
+**扩展现状**：
+
+- `wj-scheduler`（`extensions/wj-scheduler/`）：定时任务调度器。入口 `index.ts`（TS），含 `/wj-cron` 命令 + 6 个 LLM 工具；`status.ts` 为状态展示模块（轮询 `scheduler.list()` 发布激活任务行）。
+- `wj-status`（`extensions/wj-status/`）：状态栏 UI。`index.ts`（TS）实现文本框状态栏 + 底部状态栏；`balance.ts` 为余额获取模块。
+
+**扩展间通信（共享桥约定）**：wj-status 的底部状态栏（`renderLine2`）渲染时读取
+`globalThis.__wj_scheduler_footer_lines`（`string[] | null | undefined`）并追加到自身行**下方**；
+wj-scheduler 的 `status.ts` 定时发布该桥（空任务时发布 `null` 隐藏）。新扩展要往最底部
+加内容时沿用此桥模式，并须同步更新本清单。
+
 ## 三、数据存放规范（重要）
 
 **自动生成的运行时数据**必须先按是否与会话相关分类：
