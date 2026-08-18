@@ -11,6 +11,8 @@
  *   - null/undefined/空数组 → wj-status 不追加任何行
  */
 
+import { computeNextCronRun } from "./cron.ts";
+
 /** 共享桥键 —— wj-status 的 renderLine2 按此键读取 */
 export const FOOTER_BRIDGE_KEY = "__wj_scheduler_footer_lines";
 
@@ -43,7 +45,7 @@ function formatInterval(secs?: number): string {
 
 /** 任务类型的短标签 */
 function typeLabel(t: TaskLike): string {
-  if (t.type === "once") return "一次性";
+  if (t.type === "once") return "单次";
   if (t.type === "interval") return "循环";
   return "周期";
 }
@@ -64,32 +66,55 @@ function loopInterval(t: TaskLike): string {
   return "";
 }
 
-/** ISO 时间 → YYYY/MM/DD-HH:mm:ss（本地时区）；无则返回「待首跑」 */
-function timeLabel(iso?: string): string {
-  if (!iso) return "待首跑";
+/** ISO 时间 → YYYY/MM/DD-HH:mm:ss（本地时区）；无效/缺失返回 undefined */
+function timeLabel(iso?: string): string | undefined {
+  if (!iso) return undefined;
   const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return undefined;
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())}-${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 /**
+ * 计算任务有效的下次执行时间：
+ * 优先用 store 里的 nextRunAt；缺失时按类型实时估算（新任务首次执行前即显示真实时间）。
+ */
+function effectiveNextRun(t: TaskLike): string | undefined {
+  if (t.nextRunAt) return t.nextRunAt;
+  if (t.type === "interval") {
+    return new Date(Date.now() + (t.intervalSeconds ?? 60) * 1000).toISOString();
+  }
+  if (t.type === "once") {
+    const ts = t.schedule ? new Date(t.schedule).getTime() : NaN;
+    return Number.isNaN(ts) || ts <= Date.now() ? undefined : t.schedule;
+  }
+  if (t.type === "cron") {
+    return computeNextCronRun(t.schedule ?? "");
+  }
+  return undefined;
+}
+
+/**
  * 构建要展示的任务行（纯文本，无 ANSI）：
- * 仅保留 enabled 任务，按下次执行时间升序（无 nextRunAt 的排最后）。
- * 行格式：⏰ 标题 · 定时类型 · 间隔(仅循环任务) · 下次YYYY/MM/DD-HH:mm:ss · 上次.../待首跑
+ * 仅保留 enabled 任务，按下次执行时间升序。
+ * 行格式：⏰ 标题 · 定时类型 · 间隔(仅循环任务) · 下次YYYY/MM/DD-HH:mm:ss · 上次YYYY/MM/DD-HH:mm:ss(有则显示)
  */
 export function buildTaskLines(list: TaskLike[]): string[] {
   return list
     .filter((t) => t.enabled !== false)
     .sort((a, b) => {
-      const ta = a.nextRunAt ? new Date(a.nextRunAt).getTime() : Number.MAX_SAFE_INTEGER;
-      const tb = b.nextRunAt ? new Date(b.nextRunAt).getTime() : Number.MAX_SAFE_INTEGER;
+      const ta = effectiveNextRun(a) ? new Date(effectiveNextRun(a)!).getTime() : Number.MAX_SAFE_INTEGER;
+      const tb = effectiveNextRun(b) ? new Date(effectiveNextRun(b)!).getTime() : Number.MAX_SAFE_INTEGER;
       return ta - tb;
     })
     .map((t) => {
       const parts = [`⏰ ${t.name ?? "(未命名)"}`, typeLabel(t)];
       const interval = loopInterval(t);
       if (interval) parts.push(interval);
-      parts.push(`下次${timeLabel(t.nextRunAt)}`, `上次${timeLabel(t.lastRunAt)}`);
+      const next = timeLabel(effectiveNextRun(t));
+      if (next) parts.push(`下次${next}`);
+      const last = timeLabel(t.lastRunAt);
+      if (last) parts.push(`上次${last}`);
       return parts.join(" · ");
     });
 }

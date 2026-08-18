@@ -111,7 +111,8 @@
 - **不**在 settings.json packages 中，靠扩展自动发现加载（已验证）
 - 提供 `/wj-cron` 命令（status/list/get/run/enable/disable/delete）与 LLM 工具（wj_scheduler_create/list/get/update/delete/run_now）
 - **已移除 setStatus 状态推送**（`wj-scheduler: active/idle` 不再显示在状态栏）
-- **新增 `status.ts` 状态展示模块**：轮询 `scheduler.list()` → 过滤 enabled 任务 → 按 nextRunAt 升序 → 行格式 `⏰ 名称(类型) · 下次 HH:MM`（无 nextRunAt 显示「待首跑」，类型标签 一次性/每Ns/每N分/周期）→ 发布到共享桥 `globalThis.__wj_scheduler_footer_lines`（空任务发 null）；`index.ts` 在 session_start 安装（立即发布+5s 轮询，unref），shutdown 时 dispose 清桥
+- **新增 `status.ts` 状态展示模块**：轮询 `scheduler.list()` → 过滤 enabled 任务 → 按**有效下次时间**升序 → 行格式 `⏰ 标题 · 定时类型 · 间隔(仅循环) · 下次YYYY/MM/DD-HH:mm:ss · 上次YYYY/MM/DD-HH:mm:ss`；定时类型=单次/循环/周期；**无 lastRunAt 不显示上次段**；**新任务实时估算下次时间**（interval=now+间隔；once=schedule(未来)；cron=computeNextCronRun）→ 发布到共享桥 `globalThis.__wj_scheduler_footer_lines`（空任务发 null）；`index.ts` 在 session_start 安装（立即发布+5s 轮询，unref），shutdown 时 dispose 清桥
+- **cron 解析器抽为共享模块 `cron.ts`**（export computeNextCronRun）：index.ts（调度）与 status.ts（下次时间估算）共用，避免循环依赖；架构上 index.ts → status.ts → cron.ts, index.ts → cron.ts 单向无环
 - **共享桥协议**：wj-status footer `renderLine2` 渲染时读 `__wj_scheduler_footer_lines` 追加到自身行下方（ANSI-aware truncateToVisible 截断）；两扩展通过 globalThis 桥解耦，无相互 import
 - **重构要点**：新增 Task/TaskInput/HistoryEntry/SchedulerStatus 类型 + 类字段类型 + 方法签名；`import type { ExtensionAPI }`；删除零引用的死代码（defineTool/TString/TBoolean/TObject）；工具注册用本地 `register` 包装（any 上下文，规避 TypeBox 类型噪音）；`import type` 在运行时被剥离，无新增依赖
 - 锁实现：PerProcessLock（每个 session 独立锁文件，PID 存活检查）
