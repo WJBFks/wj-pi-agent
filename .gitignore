@@ -18,6 +18,7 @@ run-history.jsonl
 sessions/
 workflow-runs/
 data/
+missions/
 
 # ----- 依赖包（可再生） -----
 npm/
