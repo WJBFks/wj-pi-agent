@@ -11,6 +11,8 @@ auth.json
 models-store.json
 trust.json
 bin/
+run-history.jsonl
+.pi/
 
 # ----- 运行时 / 会话数据 -----
 sessions/

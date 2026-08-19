@@ -13,3 +13,10 @@
 ## 工作路径
 - 项目路径：当前工作目录
 - 全局路径：`~/.pi/agent`
+## 工具偏好：优先使用 context-mode 系列工具
+- 处理大文件/大数据时，优先使用 context-mode 的 ctx_* 工具，避免把原始大输出塞进对话：
+  - 分析本地文件 → `ctx_execute_file`（在沙箱内跑代码，只回摘要）；对输出做统计/过滤/解析 → `ctx_execute`
+  - 批量跑多个命令并交叉检索 → `ctx_batch_execute`（配 `queries`）
+  - 抓取网页/文档 → `ctx_fetch_and_index`，随后 `ctx_search` 定位章节；本地文档/代码 → `ctx_index` 入库后再 `ctx_search`
+  - 查上下文占用/收益 → `ctx_stats`；诊断安装 → `ctx_doctor`；升级 → `ctx_upgrade`
+- 原则：字节留在沙箱/存储，只让结论进入上下文；`console.log` 只打印需要的结果。

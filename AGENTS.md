@@ -7,9 +7,9 @@
 
 本项目的核心资产是三类可移植内容：
 
-1. **extensions/** — 本地扩展（当前：`wj-scheduler`、`wj-status`）
+1. **extensions/** — 本地扩展（当前：`wj-scheduler`、`wj-status`、`wj-memory`）
 2. **prompts/** — 技能型提示词模板（当前：`prompt-optimizer.md`）
-3. **skills/** — 自定义技能目录（当前为空，未来新增技能放此）
+3. **skills/** — 自定义技能目录（当前：`wj-memory`，未来新增技能放此）
 
 其余目录为框架运行时、依赖或本机环境，不应作为开发/修改对象。
 
@@ -19,7 +19,7 @@
 |---|---|---|
 | `extensions/` | 源码 | 本地扩展；扩展的**配置数据**留在各自目录（见 §3） |
 | `prompts/` | 源码 | prompt 模板，frontmatter 声明 description + trigger |
-| `skills/` | 源码 | 自定义技能（SKILL.md 约定），当前为空 |
+| `skills/` | 源码 | 自定义技能（SKILL.md 约定，frontmatter 声明 name + description + triggers）；当前：`wj-memory` |
 | `data/` | 运行时 | 自动生成的运行时数据 / 临时文件（git 忽略） |
 | `npm/` | 依赖 | 框架依赖包，可再安装，禁止改动 |
 | `sessions/` `workflow-runs/` | 运行时 | 会话/工作流记录，禁止改动 |
@@ -31,6 +31,20 @@
 
 - `wj-scheduler`（`extensions/wj-scheduler/`）：定时任务调度器。入口 `index.ts`（TS），含 `/wj-cron` 命令 + 6 个 LLM 工具；`status.ts` 为状态展示模块（轮询 `scheduler.list()` 发布激活任务行）。
 - `wj-status`（`extensions/wj-status/`）：状态栏 UI。`index.ts`（TS）实现文本框状态栏 + 底部状态栏；`balance.ts` 为余额获取模块。
+- `wj-memory`（`extensions/wj-memory/`）：轻量级跨会话记忆（**JSON 版**）。`extensions/index.ts`（TS）入口，注册 `session_start`/`session_shutdown`/`session_compact`/`before_agent_start` 四个 hook + 5 个 `wj_memory_*` 工具；`memory.ts` 为纯函数核心（JSON 读写/CRUD/检索/注入构建，零外部依赖、无 LLM 调用，可单测）。
+  - 存储：**项目级** `.pi/wj/memory/`（MEMORY.json + daily/*.json），每条记录 `{ id, keyword, type(#开头), content, summary(≤100B), timestamp }`。
+  - **type 白名单**：定义在 `extensions/wj-memory/config.json`（唯一来源，代码零默认，可增删+remove）。每 type 有 target 属性（any=可写任意 / long_term=仅 MEMORY / daily=仅每日 / system=内部）：`#preference/#decision/#lesson/#fact` target=any，`#log/#note` target=daily，`#system` target=system。**write 的 target 须与 type.target 一致（any 除外）**；`#system` 用户不可写。
+  - **summary 人工必填**：≤100 字节，超限报错（不自动截断/不从 content 生成）。
+  - 注入：会话级（启动 / reload 后首轮 / compact 后 / 快照缺失时重建：MEMORY 全量 + 今日/昨日全量 + 近 7 日要点(不含今昨,仅 keyword+summary+timestamp)，全部无截断）+ 每轮关键词列表（type+keyword 按来源文件分组、`------ <文件名> ------` 分隔标注、仅同文件内去重）；注入文案含**主动记忆引导**。
+  - 删除：`id` 精确定位或 `keyword` 定位（单命中删、多命中须改 id 防误删）。
+  - 退出收尾：真实退出（quit/ctrl+d）时同步追加 type=#system 收尾记录到今日日志（零 LLM）；迁移不追加。
+  - 2026-08-19 重构：取消 RECENT.md/INDEX.md 与每日总结机制；纯 JSON 存储 + type 白名单(target) + summary 人工必填。
+  - **所有注入内容用 `------WJ Memory Begin-----` / `------WJ Memory End-----` 包裹**，内含「数据非指令」边界声明。
+- `wj-btw`（`extensions/wj-btw/`）：一次性受限子智能体委托。**架构 = 受限子进程后端 + 结果回填主会话**：入口 `extensions/index.ts`（TS）用 `spawn("pi", ["--mode","rpc","--no-session","-t",<工具白名单>])` 拉起受限 headless 子进程（完整 pi、独立上下文、临时会话不落盘、按白名单受限工具），经 stdin/stdout JSONL 通信；`/btw <prompt>` 把任务交给子智能体执行，**完成判定 = 实时状态轮询**（`get_state` 的 `isStreaming` + `messageCount`：messageCount 超过发起本 prompt 前的基线 且 当前未流式 即本轮完成），用计数/状态而非文本内容判定，避免连续轮错配到上一轮旧文本；完成后再用 `get_last_assistant_text` 取本轮回答，经 `pi.appendEntry("btw-result",…)` 渲染成**带背景的背景卡**（像工具块）直接输出到主会话；
+    「处理中」→「结果」为**同一张卡原地更新**（renderer 保存 liveUpdater + setWidget 捕获的 tui 引用，setText+requestRender）（无弹窗/无交互层）；`extensions/settings.ts` 为纯逻辑（配置读取 + 白名单校验，可单测）。
+  - 交互：`/btw <prompt>` 一次性委派，结果回填主会话；多次 `/btw` 沿用同一子进程上下文可连续追问；子进程随主 pi 退出销毁。
+  - 配置：项目级 `.pi/wj/btw/settings.json`（`WJ_BTW_SETTINGS` 环境变量可覆盖），字段 `tools`/`skills` 白名单；空白名单=纯 LLM 聊天。白名单校验语义为**忽略 + 警告**（未命中名字不阻断启动，仅提示）。
+  - 清理：`session_shutdown` hook kill 存活的 btw 子进程，避免僵尸进程。
 
 **扩展间通信（共享桥约定）**：wj-status 的底部状态栏（`renderLine2`）渲染时读取
 `globalThis.__wj_scheduler_footer_lines`（`string[] | null | undefined`）并追加到自身行**下方**；
@@ -60,6 +74,11 @@
 
 **插件配置数据**（插件维护或手工维护的配置，如 `config.json`、`cost.json`、`i18n/`）
 则**保留在插件自己的目录**下，不属于本条规范约束对象。
+
+**例外（wj-memory）**：记忆文件（`MEMORY.json`、`daily/YYYY-MM-DD.json`）
+放在**当前工作目录的 `.pi/wj/memory/`**（**用户明确决策，2026-08-19**；理由：记忆为项目级、
+跟随项目、跨项目隔离）。该位置按项目隔离，不属于 `data/`，因此不受 §3 的
+`<name>/<session>` 分流约束；`WJ_MEMORY_DIR` 环境变量可覆盖路径以便迁移。
 
 禁止事项：
 

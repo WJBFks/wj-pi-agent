@@ -57,7 +57,7 @@ interface Task {
   runHistory: HistoryEntry[];
   nextRunAt?: string;
   lastRunAt?: string;
-  lastStatus?: "running" | "success" | "error";
+  lastStatus?: "pending" | "running" | "success" | "error";
   lastError?: string;
   timeoutMs?: number;
 }
@@ -79,7 +79,6 @@ interface SchedulerStatus {
   pid: number;
   taskCount: number;
   timerCount: number;
-  intervalCount: number;
   runningCount: number;
 }
 
@@ -265,21 +264,21 @@ class PerProcessTaskStore {
 class WJScheduler {
   private store: PerProcessTaskStore;
   private lock: PerProcessLock;
-  private runner: (task: Task) => Promise<void>;
+  private runner: (task: Task, entryId: string) => Promise<void>;
   private timers: Map<string, ReturnType<typeof setTimeout>>;
-  private intervals: Map<string, ReturnType<typeof setInterval>>;
   private active: boolean;
   private runningIds: Set<string>;
+  private pendingSettlements: { taskId: string; entryId: string }[];
   private heartbeatTimer: ReturnType<typeof setInterval> | null;
 
-  constructor(opts: { store: PerProcessTaskStore; lock: PerProcessLock; runner: (task: Task) => Promise<void> }) {
+  constructor(opts: { store: PerProcessTaskStore; lock: PerProcessLock; runner: (task: Task, entryId: string) => Promise<void> }) {
     this.store = opts.store;
     this.lock = opts.lock;
     this.runner = opts.runner;
     this.timers = new Map();
-    this.intervals = new Map();
     this.active = false;
     this.runningIds = new Set();
+    this.pendingSettlements = [];
     this.heartbeatTimer = null;
   }
 
@@ -293,7 +292,6 @@ class WJScheduler {
       pid: process.pid,
       taskCount: tasks.length,
       timerCount: this.timers.size,
-      intervalCount: this.intervals.size,
       runningCount: this.runningIds.size,
     };
   }
@@ -301,6 +299,8 @@ class WJScheduler {
   isActive(): boolean { return this.active; }
 
   async create(input: TaskInput): Promise<Task> {
+    // 写保护：仅持锁（active）进程可写，防止多进程同目录互覆盖
+    if (!this.active) throw new Error("调度器未激活（锁被其他进程持有），拒绝写入");
     const now = new Date().toISOString();
     const id = randomUUID();
     const def = this.#resolveSchedule(input);
@@ -321,12 +321,13 @@ class WJScheduler {
         ? [this.#histEntry("paused", "Created paused")]
         : [],
     };
-    const created = await this.store.create(task);
+    const created = await this.store.create(this.#withNextRun(task));
     if (this.active) this.#schedule(created);
     return created;
   }
 
   async update(taskId: string, input: TaskInput): Promise<Task | undefined> {
+    if (!this.active) throw new Error("调度器未激活（锁被其他进程持有），拒绝写入");
     const existing = await this.store.get(taskId);
     if (!existing) return undefined;
 
@@ -366,11 +367,13 @@ class WJScheduler {
   }
 
   async delete(taskId: string): Promise<boolean> {
+    if (!this.active) throw new Error("调度器未激活（锁被其他进程持有），拒绝写入");
     this.#unschedule(taskId);
     return this.store.delete(taskId);
   }
 
   async runNow(taskId: string): Promise<Task | undefined> {
+    if (!this.active) return undefined;
     const task = await this.store.get(taskId);
     if (!task) return undefined;
     this.#execute(taskId).catch(() => {});
@@ -388,8 +391,9 @@ class WJScheduler {
 
     const tasks = await this.store.list();
     for (const task of tasks) {
-      if (task.lastStatus === "running") {
-        // 上次异常中断
+      if (!task.enabled) continue;
+      if (task.lastStatus === "running" || task.lastStatus === "pending") {
+        // 上次异常中断（含已投递但未等到 AI 响应的 pending 任务）
         const fixed = this.#withNextRun({
           ...task,
           lastStatus: "error",
@@ -399,15 +403,21 @@ class WJScheduler {
         });
         await this.store.update(task.id, fixed).catch(() => {});
         this.#schedule(fixed);
-      } else {
-        // 错过补执行：interval 超间隔、once 已到时刻（未执行过）均立即补一次
-        await this.#maybeCatchUpInterval(task);
-        await this.#maybeCatchUpOnce(task);
-        // 补跑后以最新状态为准：once 已完成/禁用则不再调度（避免误判过期报错）
-        const latest = await this.store.get(task.id);
-        if (latest && latest.enabled === false) continue;
-        this.#schedule(this.#withNextRun(latest ?? task));
+        continue;
       }
+      // 错过补执行（需求 2）：interval 超间隔、once 已到时刻 → 立即补一次；
+      // 结算后由 #settleRun 自动续调度，这里不重复调度。
+      if (task.type === "interval" && this.#isIntervalOverdue(task)) {
+        await this.#execute(task.id);
+        continue;
+      }
+      if (task.type === "once" && this.#isOnceOverdue(task)) {
+        await this.#execute(task.id);
+        continue;
+      }
+      // cron（需求 3：错过不补，直接等下一周期）及未过期的 interval/once：
+      // 保持任务原有 nextRunAt 正常调度，不重置（interval 的下次 = 上次完成 + 间隔）。
+      this.#schedule(task);
     }
   }
 
@@ -480,47 +490,46 @@ class WJScheduler {
     if (!this.active || !task.enabled) return;
 
     if (task.type === "once") {
-      const delay = new Date(task.schedule).getTime() - Date.now();
-      if (delay <= 0) {
-        // 错过且已通过 catch-up 补跑成功（lastStatus=success）→ 不调度不报错，避免覆盖成功状态
+      const ts = new Date(task.schedule).getTime();
+      if (Number.isNaN(ts) || ts <= Date.now()) {
+        // 已过期且未通过 catch-up 补跑成功 → 报错禁用，避免反复重试
         if (task.lastStatus !== "success") {
           this.#markError(task.id, `调度时间 ${task.schedule} 已过期`);
         }
         return;
       }
-      const timer = setTimeout(() => this.#execute(task.id).catch(() => {}), delay);
-      timer.unref();
-      this.timers.set(task.id, timer);
+      this.#armTimer(task.id, ts - Date.now());
       return;
     }
 
     if (task.type === "interval") {
-      const timer = setInterval(() => this.#execute(task.id).catch(() => {}), task.intervalSeconds * 1000);
-      timer.unref();
-      this.intervals.set(task.id, timer);
+      const next = task.nextRunAt ? new Date(task.nextRunAt).getTime() : NaN;
+      const delay = Number.isNaN(next) ? task.intervalSeconds * 1000 : next - Date.now();
+      if (delay <= 0) {
+        // 过期：立即执行一次（catch-up 兜底）
+        this.#execute(task.id).catch(() => {});
+        return;
+      }
+      this.#armTimer(task.id, delay);
       return;
     }
 
-    // cron — 每次执行后重新调度
-    this.#scheduleNextCron(task);
-  }
-
-  #scheduleNextCron(task: Task): void {
+    // cron：错过不补，仅调度下一个未来周期（需求 3）
     const next = computeNextCronRun(task.schedule);
     if (!next) return;
     const delay = new Date(next).getTime() - Date.now();
     if (delay <= 0) return;
+    this.#armTimer(task.id, delay);
+  }
 
+  /** 设置一次性定时器；到点触发 execute，之后由结算（#settleRun）重新调度下一次。 */
+  #armTimer(taskId: string, delayMs: number): void {
     const timer = setTimeout(() => {
-      this.#execute(task.id).catch(() => {}).then(() => {
-        // 执行完后重新调度下一次
-        const refreshed = this.#withNextRun(task);
-        this.store.update(task.id, refreshed).catch(() => {});
-        this.#scheduleNextCron(task);
-      });
-    }, delay);
+      this.timers.delete(taskId);
+      this.#execute(taskId).catch(() => {});
+    }, Math.max(1, delayMs));
     timer.unref();
-    this.timers.set(task.id, timer);
+    this.timers.set(taskId, timer);
   }
 
   async #execute(taskId: string): Promise<void> {
@@ -530,57 +539,95 @@ class WJScheduler {
 
     this.runningIds.add(taskId);
     const startedAt = new Date().toISOString();
-    const entry = this.#histEntry("running", "Run started");
+    const entry = this.#histEntry("pending", "Task triggered, awaiting agent response");
 
+    // 触发阶段：仅标记 pending（消息已投递、等待 AI 实际处理）。
+    // 不推进 nextRunAt —— nextRunAt 在结算（#settleRun）时按"执行完成时刻"重算，
+    // 以满足"循环任务下次执行 = 上次执行完毕 + 间隔"（需求 5）。
     await this.store.update(taskId, {
       ...task,
-      lastStatus: "running",
+      lastStatus: "pending",
       runHistory: [...task.runHistory, entry].slice(-25),
       updatedAt: startedAt,
     });
 
     try {
-      await this.runner(task);
-      const completedAt = new Date().toISOString();
-      const latest = (await this.store.get(taskId)) ?? task;
-      const updated = this.#withNextRun({
-        ...latest,
-        enabled: latest.type === "once" ? false : latest.enabled,
-        lastRunAt: completedAt,
-        lastStatus: "success",
-        runHistory: this.#updateHistory(latest.runHistory, entry.id, {
-          status: "success", message: "Run completed",
-        }),
-        runCount: latest.runCount + 1,
-        updatedAt: completedAt,
-      });
-      delete updated.lastError;
-      await this.store.update(taskId, updated);
-      if (updated.type === "once") this.#unschedule(taskId);
+      // 投递触发消息（携带 任务ID+记录ID marker）；AI 处理完成后由事件回调结算
+      await this.runner(task, entry.id);
     } catch (error) {
-      const failedAt = new Date().toISOString();
-      const latest = (await this.store.get(taskId)) ?? task;
+      // 消息投递失败：结算为 error（并据此续调度下一次）
       const msg = error instanceof Error ? error.message : String(error);
-      const updated = this.#withNextRun({
-        ...latest,
-        lastStatus: "error",
-        lastError: msg,
-        runHistory: this.#updateHistory(latest.runHistory, entry.id, {
-          status: "error", message: msg,
-        }),
-        updatedAt: failedAt,
-      });
-      await this.store.update(taskId, updated);
+      await this.#settleRun(taskId, entry.id, "error", msg);
     } finally {
       this.runningIds.delete(taskId);
+    }
+  }
+
+  /**
+   * before_agent_start 命中任务 marker 时调用：
+   * 将该任务的本次触发（entryId）压入待结算队列（消息被 AI 处理的顺序 = 队列顺序）。
+   */
+  markAgentRunStarted(taskId: string, entryId: string): void {
+    this.pendingSettlements.push({ taskId, entryId });
+  }
+
+  /**
+   * agent_settled 事件回调：AI 已完整处理完一条触发消息。
+   * 从队列取出队首触发并按 entryId 精确结算为 success（记录 lastRunAt / runCount+1），
+   * 同任务连续多次触发也不会串位。once 任务结算成功后自动禁用。
+   */
+  async markAgentRunSettled(): Promise<void> {
+    const item = this.pendingSettlements.shift();
+    if (!item) return;
+    await this.#settleRun(item.taskId, item.entryId, "success");
+  }
+
+  /**
+   * 统一结算一次执行（成功或失败）：
+   * - 更新对应 pending 历史条目为 success/error；
+   * - success 时 runCount+1；
+   * - 无论成败均记录 lastRunAt（执行结束时间，非 pending 即视为"执行完成"，见需求 5）；
+   * - once 任务结算后禁用（一次性语义，失败也不再重试）；
+   * - 用结算时刻重算 nextRunAt（interval: 完成+间隔；cron: 下一周期），并续调度。
+   */
+  async #settleRun(taskId: string, entryId: string, status: "success" | "error", errorMessage?: string): Promise<void> {
+    const task = await this.store.get(taskId);
+    if (!task || task.lastStatus !== "pending") return;
+
+    const completedAt = new Date().toISOString();
+    const runHistory = this.#updateHistory(task.runHistory, entryId, {
+      status,
+      message: status === "success" ? "Run completed" : (errorMessage ?? "Run failed"),
+    });
+
+    const updated = {
+      ...task,
+      enabled: task.type === "once" ? false : task.enabled,
+      lastRunAt: completedAt,
+      lastStatus: status,
+      runHistory,
+      runCount: status === "success" ? task.runCount + 1 : task.runCount,
+      updatedAt: completedAt,
+    };
+    if (status === "error") {
+      updated.lastError = errorMessage ?? "Run failed";
+    } else {
+      delete updated.lastError;
+    }
+
+    const settled = this.#withNextRun(updated);
+    await this.store.update(taskId, settled);
+
+    if (settled.type === "once" || !settled.enabled) {
+      this.#unschedule(taskId);
+    } else {
+      this.#schedule(settled);
     }
   }
 
   #unschedule(taskId: string): void {
     const t = this.timers.get(taskId);
     if (t) { clearTimeout(t); this.timers.delete(taskId); }
-    const i = this.intervals.get(taskId);
-    if (i) { clearInterval(i); this.intervals.delete(taskId); }
   }
 
   async #markError(taskId: string, error: string): Promise<void> {
@@ -598,32 +645,21 @@ class WJScheduler {
     await this.store.update(taskId, updated);
   }
 
-  /**
-   * interval 任务追赶（catch-up）：
-   * 重启/恢复后，若已超过「上次运行（或创建）+ 间隔」而期间未曾执行，则立即补执行一次。
-   * 基准：有 lastRunAt 用 lastRunAt；从未执行过则用 createdAt（创建时间 = 首个周期起点）。
-   */
-  async #maybeCatchUpInterval(task: Task): Promise<void> {
-    if (task.type !== "interval" || !task.enabled) return;
+  /** interval 是否已过期（距上次完成或创建超过一个间隔）——用于重启后补跑判断 */
+  #isIntervalOverdue(task: Task): boolean {
+    if (task.type !== "interval") return false;
     const intervalMs = (task.intervalSeconds ?? 60) * 1000;
     const base = task.lastRunAt
       ? new Date(task.lastRunAt).getTime()
       : new Date(task.createdAt).getTime();
-    if (!Number.isNaN(base) && Date.now() >= base + intervalMs) {
-      await this.#execute(task.id);
-    }
+    return !Number.isNaN(base) && Date.now() >= base + intervalMs;
   }
 
-  /**
-   * once 任务追赶：重启后若调度时刻已过（错过且尚未执行），立即补执行一次。
-   * 执行成功后 once 任务自动禁用（一次性语义）。
-   */
-  async #maybeCatchUpOnce(task: Task): Promise<void> {
-    if (task.type !== "once" || !task.enabled) return;
+  /** once 是否已到调度时刻且未执行——用于重启后补跑判断 */
+  #isOnceOverdue(task: Task): boolean {
+    if (task.type !== "once") return false;
     const ts = task.schedule ? new Date(task.schedule).getTime() : NaN;
-    if (!Number.isNaN(ts) && ts <= Date.now()) {
-      await this.#execute(task.id);
-    }
+    return !Number.isNaN(ts) && ts <= Date.now();
   }
 
   #startHeartbeat(): void {
@@ -654,6 +690,18 @@ export default function wjSchedulerExtension(pi: ExtensionAPI) {
   let ownsScheduler = false;
   let statusDispose: { dispose(): void } | undefined;
 
+  // AI 处理触发消息的生命周期（模块级注册一次，闭包引用 scheduler）：
+  // - before_agent_start：prompt 含任务 marker → 入队（该 agent 循环在处理此任务）
+  // - agent_settled：agent 循环完全结束 → 出队结算为 success（记录 lastRunAt/runCount）
+  // 这样 lastStatus 在消息投递后保持 pending，直到 AI 真正响应完才变为 success。
+  pi.on("before_agent_start", (event) => {
+    const m = event.prompt?.match(/<!-- wj-scheduler-run:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) -->/);
+    if (m?.[1] && m[2]) scheduler?.markAgentRunStarted(m[1], m[2]);
+  });
+  pi.on("agent_settled", () => {
+    scheduler?.markAgentRunSettled().catch(() => {});
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     try {
       // ════════════════════════════════════════════
@@ -666,8 +714,8 @@ export default function wjSchedulerExtension(pi: ExtensionAPI) {
 
       const store = new PerProcessTaskStore(path.join(sessionDir, "tasks.json"));
       const lock = new PerProcessLock(sessionDir);
-      const runner = async (task) => {
-        const msg = buildTriggerMessage(task);
+      const runner = async (task, entryId) => {
+        const msg = buildTriggerMessage(task, entryId);
         // 使用 followUp 让消息排队，等 AI 空闲后再处理
         pi.sendUserMessage(msg, { deliverAs: "followUp" });
       };
@@ -722,7 +770,6 @@ export default function wjSchedulerExtension(pi: ExtensionAPI) {
               `PID: ${st.pid}`,
               `Tasks: ${st.taskCount}`,
               `Timers: ${st.timerCount}`,
-              `Intervals: ${st.intervalCount}`,
               `Running: ${st.runningCount}`,
             ].join("\n"),
             "info",
@@ -802,7 +849,7 @@ export default function wjSchedulerExtension(pi: ExtensionAPI) {
 /**
  * 构建结构化的定时任务触发消息
  */
-function buildTriggerMessage(task: Task): string {
+function buildTriggerMessage(task: Task, entryId: string): string {
   const now = new Date();
   const triggerTime = now.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
   const typeLabel = { once: "一次性", interval: "固定间隔", cron: "周期性" }[task.type] ?? task.type;
@@ -866,7 +913,11 @@ function buildTriggerMessage(task: Task): string {
     subSeparator,
     "",
     task.prompt,
-  ].filter(Boolean).join("\n");
+  ].filter(Boolean).join("\n")
+    // 消息末尾注入任务标记（taskId + 本次触发的记录 ID）：
+    // before_agent_start 事件据此识别"AI 正在处理哪次触发"，agent_settled 时精确结算为
+    // success（对 AI 无实质影响，仅内部配对用）
+    + `\n\n<!-- wj-scheduler-run:${task.id}:${entryId} -->`;
 }
 
 function registerTools(pi: ExtensionAPI, scheduler: WJScheduler) {

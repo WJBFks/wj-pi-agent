@@ -1,0 +1,12 @@
+{
+  "name": "wj-btw",
+  "version": "0.1.0",
+  "description": "WJ BTW — 主 TUI 内「即焚」轻量对话浮层：受限子进程(pi --mode rpc)后端 + 主进程转发，默认纯聊天、工具/技能白名单可配，会话不落盘，ESC 关闭即毁",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package", "pi", "extension", "btw", "chat", "overlay", "whitelist"],
+  "files": ["extensions"],
+  "pi": {
+    "extensions": ["./extensions/index.ts"]
+  }
+}

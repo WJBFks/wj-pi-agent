@@ -1,0 +1,6 @@
+{
+  "$schema": "./schema.json",
+  "comment": "wj-btw 扩展内置默认设置。项目级覆盖文件：<项目>/.pi/wj/btw/settings.json（或 WJ_BTW_SETTINGS 环境变量指定路径）。白名单为空 = 纯 LLM 聊天（不调工具）。",
+  "tools": [],
+  "skills": []
+}
