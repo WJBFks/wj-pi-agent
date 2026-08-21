@@ -1,7 +1,7 @@
 {
   "name": "wj-memory",
-  "version": "0.1.0",
-  "description": "WJ Memory — 轻量级跨会话记忆：长期记忆 + 每日日志 + 每日总结(RECENT) + 关键词索引 + 纯文本检索，零外部依赖",
+  "version": "0.2.0",
+  "description": "WJ Memory — 轻量级跨会话记忆扩展（JSON 版）：长期记忆 + 每日日志 + type 白名单/晋升 + 7 个工具(读写/检索/提升/降级) + 会话级注入，零外部依赖",
   "type": "module",
   "license": "MIT",
   "keywords": ["pi-package", "pi", "extension", "memory", "daily-log", "search"],

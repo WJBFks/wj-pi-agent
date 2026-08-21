@@ -1,12 +1,22 @@
 {
   "name": "wj-status",
-  "version": "0.1.0",
-  "description": "WJ Status — lightweight Pi status bar: model, tokens, cache, cost, context, CWD",
+  "version": "0.2.0",
+  "description": "WJ Status — pi 状态栏 UI：文本框状态栏(status·model·provider·扩展状态·think) + 底部状态栏(model/tokens/cache/cost/context/CWD/余额)；渲染扩展桥发布的行（如 wj-scheduler 激活任务）；i18n 中英、locale/currency 可配，宽度用 pi-tui visibleWidth 精确测量/截断防超宽",
   "type": "module",
   "license": "MIT",
-  "keywords": ["pi-package", "pi", "extension", "status-bar", "footer"],
-  "files": ["extensions"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "status-bar",
+    "footer"
+  ],
+  "files": [
+    "extensions"
+  ],
   "pi": {
-    "extensions": ["./extensions/index.ts"]
+    "extensions": [
+      "./extensions/index.ts"
+    ]
   }
 }

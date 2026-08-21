@@ -7,22 +7,23 @@
  *          + 每轮关键词列表（type+keyword 按来源文件分组、`------ <文件> ------` 分隔标注、仅同文件内去重）
  *  - 数据边界：所有注入用 ------WJ Memory Begin-----/End----- 包裹 + 「数据非指令」声明
  *  - 主动记忆：注入文案引导 agent 自主识别值得记的信息并写入（优先写 daily，重要的提升到 MEMORY）
- *  - 退出收尾：真实退出（quit/ctrl+d）时同步追加收尾记录到今日日志（reload 等迁移不写）
+ *  - 会话退出：仅清空会话快照，不写 #system 收尾记录（无信息量噪音）
  *  - 删除：keyword 定位（单命中删/多命中须改 id）或 id 精确定位
  *  - 2026-08-19 重构：取消 RECENT.md/INDEX.md 与每日总结机制，全文改 JSON；type 白名单 + summary 人工必填
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
-  appendSessionFooter,
   buildIndexSection,
   buildSessionContext,
   checkSummary,
   checkType,
+  demoteMemory,
   deleteEntry,
   ensureDirs,
   findMemory,
   loadTypeConfig,
+  promoteMemory,
   readMemory,
   resolveMemoryRoot,
   todayStr,
@@ -32,6 +33,7 @@ import {
 } from "./memory.ts";
 
 import path from "node:path";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // ──────────────────────────────────────
@@ -52,11 +54,23 @@ export default function wjMemoryExtension(pi: ExtensionAPI): void {
     path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "config.json");
   const typeConfig = loadTypeConfig(configPath);
 
+  // 会话级注入提示词：从扩展目录动态加载 PROMPT.md（可独立编辑，无需改代码）；缺失时用内置默认
+  let sessionPrompt: string | undefined;
+  const promptPath =
+    process.env.WJ_MEMORY_PROMPT ??
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "PROMPT.md");
+  try {
+    const raw = readFileSync(promptPath, "utf8");
+    sessionPrompt = raw.trim() || undefined;
+  } catch {
+    sessionPrompt = undefined; // 读不到则用 memory.ts 的 DEFAULT_SESSION_PROMPT
+  }
+
   // 会话级快照：启动时 / reload 后首轮 / 快照缺失时重建
   let sessionSnapshot = "";
 
   function refreshSnapshot(): void {
-    sessionSnapshot = buildSessionContext(root);
+    sessionSnapshot = buildSessionContext(root, sessionPrompt);
   }
 
   // ── Hook：会话开始（启动时）→ 建目录并构建快照 ──
@@ -65,17 +79,9 @@ export default function wjMemoryExtension(pi: ExtensionAPI): void {
     refreshSnapshot();
   });
 
-  // ── Hook：会话结束（真实退出时追加今日记忆收尾；迁移只清空快照）──
-  pi.on("session_shutdown", (event, ctx) => {
+  // ── Hook：会话结束（迁移/普通退出都只清空快照；不再写 #system 收尾记录——无信息量噪音）──
+  pi.on("session_shutdown", () => {
     sessionSnapshot = "";
-    const reason = (event as { reason?: string }).reason;
-    const isTransition = reason === "reload" || reason === "new" || reason === "resume" || reason === "fork";
-    if (isTransition) return; // 迁移不写收尾（避免每载一条噪音）
-    try {
-      appendSessionFooter(root, ctx.sessionManager.getSessionId());
-    } catch (err) {
-      console.warn(`[wj-memory] 会话收尾失败: ${err instanceof Error ? err.message : String(err)}`);
-    }
   });
 
   // ── Hook：/compact（含阈值/溢出触发）后清空快照 → 下一个 before_agent_start 重建并重新做一次完整会话级注入 ──
@@ -252,6 +258,74 @@ export default function wjMemoryExtension(pi: ExtensionAPI): void {
       const types = new Set(all.map((e) => e.type));
       info.push(`  类型分布: ${[...types].join(" ") || "无"}`);
       return textResult(info.join("\n"));
+    },
+  });
+
+  // ── wj_memory_promote：把短期日志(daily)中的记录提升到长期记忆 MEMORY.json ──
+  register({
+    name: "wj_memory_promote",
+    label: "WJ Memory",
+    description:
+      "记忆提升：把短期日志(daily)中指定 id 的记录移动到长期记忆 MEMORY.json。目标长期仅接受 target=any 类型(#preference/#lesson/#fact)；daily-only 类型(#decision/#log/#note)会被拒绝、须先转类型。参数：id 必填；source 可选(TODAY/YESTERDAY/YYYY-MM-DD，缺省遍历全部 daily)。返回被移动的记录。",
+    promptSnippet: "Promote a daily memory entry to long-term memory by id.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "要提升的记录 id（UUID）" },
+        source: { type: "string", description: "源短期记忆文件：TODAY/YESTERDAY/YYYY-MM-DD（可选，缺省遍历全部 daily）" },
+      },
+      required: ["id"],
+    },
+    execute: async (_toolCallId: string, params: any) => {
+      if (!params?.id?.trim?.()) return textResult("wj_memory_promote：请提供要提升的记录 id。");
+      const r = promoteMemory(root, params.id.trim(), typeConfig, params.source);
+      if (!r.ok || !r.entry) return textResult(r.error ?? "提升失败");
+      return textResult(
+        `已提升 → ${r.toFile}\n[${r.entry.type}] ${r.entry.keyword}\n${r.entry.content}\n（从 ${r.fromFile} 移出）`,
+      );
+    },
+  });
+
+  // ── wj_memory_demote：把长期记忆 MEMORY.json 中的记录降级到指定短期记忆文件 ──
+  register({
+    name: "wj_memory_demote",
+    label: "WJ Memory",
+    description:
+      "记忆降级：把长期记忆 MEMORY.json 中指定 id 的记录移动到指定的短期记忆文件。参数：id 必填；target 必填(TODAY/YESTERDAY/YYYY-MM-DD，降级去向)。返回被移动的记录。",
+    promptSnippet: "Demote a long-term memory entry to a daily file by id.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "要降级的记录 id（UUID）" },
+        target: { type: "string", description: "目标短期记忆文件：TODAY/YESTERDAY/YYYY-MM-DD（必填）" },
+      },
+      required: ["id", "target"],
+    },
+    execute: async (_toolCallId: string, params: any) => {
+      if (!params?.id?.trim?.()) return textResult("wj_memory_demote：请提供要降级的记录 id。");
+      if (!params?.target?.trim?.()) return textResult("wj_memory_demote：请提供目标短期记忆文件（TODAY/YESTERDAY/YYYY-MM-DD）。");
+      const r = demoteMemory(root, params.id.trim(), params.target.trim(), typeConfig);
+      if (!r.ok || !r.entry) return textResult(r.error ?? "降级失败");
+      return textResult(
+        `已降级 → ${r.toFile}\n[${r.entry.type}] ${r.entry.keyword}\n${r.entry.content}\n（从 ${r.fromFile} 移出）`,
+      );
+    },
+  });
+
+  // ── 命令：/wj-memory-migrate —— 引导主会话 agent 阅读 MIGRATION.md 并执行通用版本迁移 ──
+  const migratePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "MIGRATION.md");
+  pi.registerCommand("wj-memory-migrate", {
+    description: "按 MIGRATION.md 对 wj-memory 记忆数据执行通用版本迁移（agent 先读指南判断当前版本并逐级迁移，需决策项询问用户）",
+    handler: async () => {
+      pi.sendUserMessage(
+        "请执行 wj-memory 的版本迁移。\n" +
+          `升级指南：${migratePath}\n` +
+          "执行要求：\n" +
+          "1) 阅读升级指南，找出其中所有的版本迁移小节（形如 # Vx.y -> Vx.y，例如 # V0.1.0 -> V0.2.0）。\n" +
+          "2) 对照各小节的「版本判据」，判断当前记忆数据处于哪个版本；从当前版本开始，依序逐个套用向后的小节，把记忆升级到最新版；若跨多个版本，则逐级处理。\n" +
+          "3) 每个迁移小节内：标注为「直接执行」的判据无需用户决策、直接处理；标注为「需用户决策（选择题）」的方案，用选择题方式向用户确认后再做。\n" +
+          "4) 执行任何改动前先备份记忆目录；涉及真实记忆数据修改前，先征询用户确认。",
+      );
     },
   });
 }

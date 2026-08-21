@@ -2,7 +2,7 @@
   "description": "wj-memory type 白名单（唯一来源，代码零默认；改此文件后重启 pi 生效）。每个 type 的 target 决定可写入的目标：any=可写任意文件；long_term=仅长期 MEMORY.json；daily=仅每日记忆；system=系统内部（用户不可写）。write 的 target 必须与 type.target 一致（any 除外），否则报错。",
   "types": {
     "#preference": { "desc": "用户偏好/习惯/风格", "target": "any" },
-    "#decision": { "desc": "拍板决策（含理由）", "target": "any" },
+    "#decision": { "desc": "拍板决策（含理由；多属近期拍板，默认只写 daily；确需长期化的极少数可在确认长期有效后转 #fact/#lesson 等再入长期）", "target": "daily" },
     "#lesson": { "desc": "踩坑教训/经验", "target": "any" },
     "#fact": { "desc": "事实/背景/项目约定", "target": "any" },
     "#log": { "desc": "每日记忆·流水/进展（可含大段 content）", "target": "daily" },

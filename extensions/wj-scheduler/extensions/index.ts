@@ -8,7 +8,8 @@
  *    仅第一个启动的进程能获取锁，其他进程静默失败。
  *
  * 🔧 修复方案：
- *    每个进程使用独立的数据目录 ~/.pi/agent/data/wj-scheduler/<pid>/
+ *    锁文件落在 session 隔离目录内，不同 session 不冲突；
+ *    数据目录为项目级 .pi/wj/scheduler/<sessionId>/（WJ_SCHEDULER_DIR 可覆盖）。
  */
 
 // ──────────────────────────────────────
@@ -17,6 +18,7 @@
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { Box, Text, type Component } from "@earendil-works/pi-tui";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { computeNextCronRun } from "./cron.ts";
 import { installSchedulerStatus } from "./status.ts";
@@ -83,17 +85,14 @@ interface SchedulerStatus {
 }
 
 /**
- * 解析用户主目录
+ * 调度器数据根目录：项目级 .pi/wj/scheduler/<sessionId>（与 wj-memory 同级模式）
+ * - 默认基于当前工作目录（跟随项目）
+ * - WJ_SCHEDULER_DIR 环境变量可覆盖根目录（迁移/测试用），仍追加 <sessionId>
  */
-function resolveHome(): string {
-  return process.env.HOME || process.env.USERPROFILE || "/home/jiaxingwang";
-}
-
-/**
- * 获取 PI agent 数据目录
- */
-function getAgentDataDir(): string {
-  return path.join(resolveHome(), ".pi", "agent", "data");
+function resolveSchedulerRoot(sessionId: string): string {
+  const override = process.env.WJ_SCHEDULER_DIR?.trim();
+  if (override) return path.join(override, sessionId);
+  return path.join(process.cwd(), ".pi", "wj", "scheduler", sessionId);
 }
 
 // ──────────────────────────────────────
@@ -105,36 +104,40 @@ class PerProcessLock {
   private acquired: boolean;
 
   constructor(lockDir: string) {
-    // 锁文件放在 session 隔离目录内，不同 session 不冲突
-    this.path = path.join(lockDir, "scheduler.lock");
+    // 锁文件放在 session 隔离目录内，不同 session 不冲突；保存持有者 PID
+    this.path = path.join(lockDir, ".lock");
     this.acquired = false;
   }
 
   acquire(): boolean {
     mkdirSync(path.dirname(this.path), { recursive: true });
-    try {
-      writeFileSync(this.path, String(process.pid), { flag: "wx" });
+    // 1) 锁不存在（或目录为空）→ 原子创建获取
+    if (this.#writeWx()) {
       this.acquired = true;
       return true;
-    } catch {
-      // 锁文件已存在，检查 PID
-      try {
-        const pid = Number(readFileSync(this.path, "utf8").trim());
-        if (pid === process.pid) {
-          this.acquired = true;
-          return true;
-        }
-        // 旧进程死亡则清理
-        if (!this.#isAlive(pid)) {
-          unlinkSync(this.path);
-          writeFileSync(this.path, String(process.pid), { flag: "wx" });
-          this.acquired = true;
-          return true;
-        }
-      } catch {}
+    }
+    // 锁已存在：读持有者 PID 判定是否可抢占
+    const holder = this.#readHolderPid();
+    if (holder === process.pid) {
+      // 本进程已持有（可重入）
+      this.acquired = true;
+      return true;
+    }
+    if (holder !== 0 && this.#isAlive(holder)) {
+      // 持有者进程存活（含 EPERM 探测受限，保守视为存活）→ 获取失败
       this.acquired = false;
       return false;
     }
+    // 2) 持有者已死，或 3a) 锁文件空/损坏（holder===0）→ 清理并重新获取
+    try {
+      unlinkSync(this.path);
+      if (this.#writeWx()) {
+        this.acquired = true;
+        return true;
+      }
+    } catch {}
+    this.acquired = false;
+    return false;
   }
 
   release(): void {
@@ -148,9 +151,43 @@ class PerProcessLock {
 
   isAcquired(): boolean { return this.acquired; }
 
+  /**
+   * 当前锁文件的持有者 PID（用于失败文案展示占用者）；
+   * 无锁/空/损坏时返回 0（此时按可抢占处理）。
+   */
+  holderPid(): number {
+    return this.#readHolderPid();
+  }
+
+  #readHolderPid(): number {
+    // 返回 0 表示锁文件不存在/空/损坏（视为可抢占）
+    try {
+      const raw = readFileSync(this.path, "utf8").trim();
+      const pid = Number(raw);
+      return Number.isInteger(pid) && pid > 0 ? pid : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  #writeWx(): boolean {
+    // 原子创建（flag wx）：仅当锁不存在时成功，绝不覆盖他人锁
+    try {
+      writeFileSync(this.path, String(process.pid), { flag: "wx" });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   #isAlive(pid: number): boolean {
-    try { process.kill(pid, 0); return true; }
-    catch { return false; }
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err: any) {
+      // 仅 ESRCH（进程不存在）视为已死；EPERM 等探测受限保守视为存活
+      return (err as NodeJS.ErrnoException)?.code !== "ESRCH";
+    }
   }
 }
 
@@ -383,7 +420,7 @@ class WJScheduler {
   async start(): Promise<void> {
     if (this.active) return;
     if (!this.lock.acquire()) {
-      console.warn("[wj-scheduler] 锁获取失败");
+      // 锁获取失败：不再打印终端日志（不可见），仅通过主会话提示（见 session_start 锁状态汇报）
       return;
     }
     this.active = true;
@@ -690,6 +727,43 @@ export default function wjSchedulerExtension(pi: ExtensionAPI) {
   let ownsScheduler = false;
   let statusDispose: { dispose(): void } | undefined;
 
+/** 空行组件：pi-tui Text 对空白行 render 返回 [] 会被跳过，须用此组件插入空行（render 返回 [""]） */
+class BlankLine implements Component {
+  invalidate(): void {}
+  render(_width: number): string[] {
+    return [""];
+  }
+}
+
+// 锁获取结果的主会话展示卡
+  // ⚠️ 注意：pi-tui 的 addChild() 不返回 this（返回 undefined），必须分两步：先 addChild 再 return box，
+  //    否则 renderer 整体返回 undefined，CustomEntryComponent.hasContent()=false → 卡片静默不显示。
+  // 布局：第一行加粗（[wj-scheduler] 成功=自绘真彩色纯绿 38;2;80;220;80 / 失败=warning 黄 token + 标题 text 色），
+  //   标题与正文之间空一行（Text 对空白行返回 [] 会被跳过，须用 BlankLine 组件），
+  //   正文行灰色（muted）；`/reload` 用行内代码主题色（mdCode）；背景 customMessageBg。
+  pi.registerEntryRenderer("wj-scheduler-status", (entry: any, _opts: any, theme: any) => {
+    const d = (entry.data ?? {}) as { active?: boolean; pid?: number };
+    if (typeof d.active !== "boolean") return undefined;
+    const pid = d.pid ?? process.pid;
+    const fg = (c: string, t: string) => theme.fg(c, t);
+    // 主题内 success="green"=#b5bd68（黄绿色，非纯绿）——成功标签用自绘真彩色绿
+    const green = (t: string) => `\x1b[38;2;80;220;80m${t}\x1b[39m`;
+    const body = d.active
+      ? [fg("muted", `进程锁获取成功(PID ${pid}), 定时调度器运行中`)]
+      : [
+          fg("muted", `进程锁已被占用(PID ${pid}), 定时调度器正在其他进程中运行`),
+          fg("muted", `如需在当前进程中运行，请先停止进程(PID ${pid})后重新启动(`) + fg("mdCode", "/reload") + fg("muted", ")"),
+        ];
+    const title = d.active
+      ? theme.bold(green("[wj-scheduler]")) + theme.bold(fg("text", " 定时调度器启用成功"))
+      : theme.bold(fg("warning", "[wj-scheduler]")) + theme.bold(fg("text", " 定时调度器启用失败"));
+    const box = new Box(1, 1, (t: string) => theme.bg("customMessageBg", t));
+    box.addChild(new Text(title, 0, 0));
+    box.addChild(new BlankLine()); // 标题与正文之间空行（Text 空白行会被跳过）
+    box.addChild(new Text(body.join("\n"), 0, 0));
+    return box;
+  });
+
   // AI 处理触发消息的生命周期（模块级注册一次，闭包引用 scheduler）：
   // - before_agent_start：prompt 含任务 marker → 入队（该 agent 循环在处理此任务）
   // - agent_settled：agent 循环完全结束 → 出队结算为 success（记录 lastRunAt/runCount）
@@ -709,7 +783,8 @@ export default function wjSchedulerExtension(pi: ExtensionAPI) {
       // 不同 session（/exit + pi 新开）各自独立
       // ════════════════════════════════════════════
       const sessionId = ctx.sessionManager.getSessionId();
-      const sessionDir = path.join(getAgentDataDir(), "wj-scheduler", sessionId);
+      // 项目级 .pi/wj/scheduler/<sessionId>：任务数据 + 锁（session 隔离，跟随项目，不入全局 data/）
+      const sessionDir = resolveSchedulerRoot(sessionId);
       mkdirSync(sessionDir, { recursive: true });
 
       const store = new PerProcessTaskStore(path.join(sessionDir, "tasks.json"));
@@ -724,6 +799,19 @@ export default function wjSchedulerExtension(pi: ExtensionAPI) {
       await instance.start();
       scheduler = instance;
       ownsScheduler = true;
+
+      // 锁获取结果（成功/失败）在主会话持久卡片提示（registerEntryRenderer + appendEntry，
+      // 与 wj-btw 同构）——直接同步 append，不延迟（renderer 修复后同步即可显示；
+      // 即使启动期实时渲染错过，entry 也已入库，reload/重建时会显示）。无弹窗、无终端输出。
+      // pid = 锁持有者（成功=自身进程；失败=占用者），供 renderer 排版文案。
+      try {
+        pi.appendEntry("wj-scheduler-status", {
+          active: instance.isActive(),
+          pid: lock.holderPid() || process.pid,
+        });
+      } catch (err) {
+        console.error("[wj-scheduler] 锁状态主会话提示失败:", err);
+      }
 
       // 底部状态栏展示（写入共享桥，wj-status footer 追加显示）
       statusDispose = installSchedulerStatus(scheduler);

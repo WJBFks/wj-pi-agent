@@ -20,3 +20,10 @@
   - 抓取网页/文档 → `ctx_fetch_and_index`，随后 `ctx_search` 定位章节；本地文档/代码 → `ctx_index` 入库后再 `ctx_search`
   - 查上下文占用/收益 → `ctx_stats`；诊断安装 → `ctx_doctor`；升级 → `ctx_upgrade`
 - 原则：字节留在沙箱/存储，只让结论进入上下文；`console.log` 只打印需要的结果。
+
+[wj-scheduler] 定时调度器启用成功
+进程锁获取成功(PID 20588), 定时调度器运行中
+
+[wj-scheduler] 定时调度器启用失败
+进程锁已被占用(PID 20588), 定时调度器正在其他进程中运行
+如需在当前进程中运行，请先停止进程(PID 20588)后重新启动(/reload)

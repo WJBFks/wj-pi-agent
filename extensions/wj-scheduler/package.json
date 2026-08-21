@@ -1,7 +1,7 @@
 {
   "name": "wj-scheduler",
-  "version": "0.1.0",
-  "description": "WJ Scheduler — 修复了跨进程锁竞争的定时任务管理器",
+  "version": "0.2.0",
+  "description": "WJ Scheduler — pi 定时任务调度器：cron/once/interval 三种任务类型 + /wj-cron 命令 + 6 个 LLM 工具；每进程独立锁（数据目录按 pid 隔离，无跨进程锁竞争）、会话级任务持久化、激活任务行发布到底部状态栏",
   "type": "module",
   "license": "MIT",
   "keywords": [

@@ -2,12 +2,12 @@
 # ~/.pi/agent 版本控制忽略规则
 # 策略：忽略敏感 / 本机环境 / 运行时 / 临时 / 演示内容
 # 保留：可移植配置 + 用户自定义扩展与技能
-#   （SYSTEM.md、settings.json、tools.json、
-#    extensions/、skills/、prompts/）
+#   （SYSTEM.md、extensions/、skills/、prompts/）
 # ================================================
 
 # ----- 敏感凭据 / 本机状态 / 本机二进制 -----
 auth.json
+auth.json.bak
 models-store.json
 trust.json
 bin/
@@ -46,3 +46,9 @@ Thumbs.db
 # 旧版 wj-status 数据文件位置（已迁移至 data/wj-status/，旧进程停止前可能残留写入）
 extensions/wj-status/balance-cache.json
 extensions/wj-status/cost-tracking.json
+
+# ----- 个人配置文档（2026-08-21 用户决策：不纳入版本控制）-----
+settings.json
+MEMORY.md
+AGENTS.md
+tools.json

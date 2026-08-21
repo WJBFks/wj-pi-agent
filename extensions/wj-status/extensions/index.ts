@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type ExtensionAPI, type ExtensionContext, CustomEditor, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, CustomEditor, getAgentDir, SettingsManager, keyText } from "@earendil-works/pi-coding-agent";
 // 用 pi-tui 官方的宽度工具（与 TUI 渲染宽度完全一致），避免自实现宽度表对
 // ⏰(U+23F0) 等 Ambiguous 字符误判导致渲染行超宽、pi 崩溃。
 import { visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
@@ -17,9 +17,20 @@ import { getBalance } from "./balance";
 const _dirname = dirname(fileURLToPath(import.meta.url));
 const EXT_DIR = join(_dirname, "..");
 
+/**
+ * 状态数据根目录：项目级 .pi/wj/status（与 wj-memory/wj-scheduler 同级模式）
+ * - 默认基于当前工作目录（跟随项目）
+ * - WJ_STATUS_DIR 环境变量可覆盖根目录（迁移/测试用）
+ */
+function resolveStatusRoot(): string {
+  const override = process.env.WJ_STATUS_DIR?.trim();
+  if (override) return override;
+  return join(process.cwd(), ".pi", "wj", "status");
+}
+
 // Cost tracking (todayCost resets at midnight)
-// 会话级数据：data/wj-status/<sessionId>/cost-tracking.json（session_start 时设置）
-let COST_TRACKING_FILE = join(EXT_DIR, "cost-tracking.json");
+// 会话级数据：项目级 .pi/wj/status/<sessionId>/cost-tracking.json（session_start 时设置）
+let COST_TRACKING_FILE = join(resolveStatusRoot(), "cost-tracking.json");
 
 interface CostTracking {
   lastMidnightCost: number;
@@ -178,8 +189,9 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
     return getBalance(provider, apiKey);
   }
 
-  // 全局数据（余额与 provider/key 绑定，不随会话变化）：data/wj-status/balance-cache.json
-  const CACHE_FILE = join(getAgentDir(), "data", "wj-status", "balance-cache.json");
+  // 余额缓存（与 provider/key 绑定；随会话归档）：项目级 .pi/wj/status/<sessionId>/balance-cache.json
+  // （session_start 时重设为会话目录；此处为兜底默认）
+  let CACHE_FILE = join(resolveStatusRoot(), "balance-cache.json");
 
   function readBalanceCache(provider: string): { balance: string | null; timestamp: number } {
     try {
@@ -397,7 +409,7 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
     const s = footerState?.activity ?? "ready";
     const model = footerState?.modelId ?? "-";
     const provider = footerState?.provider;
-    const think = footerState?.thinkingLevel ?? "-";
+    const think = footerState?.thinkingLevel ?? "off";
     // 编辑器 theme 是 pi-tui 的 EditorTheme，没有 fg()；颜色统一用 atelier 主题。
     const color = (name: string, x: string) =>
       typeof theme?.fg === "function" ? theme.fg(name, x) : x;
@@ -409,28 +421,39 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
     for (const text of statusesCache) if (text) statuses.push(text);
     const statusStr = statuses.length > 0 ? muted(statuses.join("  ")) : "";
     const statusLabel = s === "ready" ? t.status.ready : s === "working" ? t.status.working : t.status.error;
-    const BLUE = "\x1b[38;2;114;211;252m";
-    const RESET = "\x1b[39m";
 
-    // 显示单元（按隐藏顺序排列：越靠前越先被隐藏）
+    // 思考等级值的颜色 = 输入框边框颜色：interactive-mode 切换思考时用
+    // theme.getThinkingBorderColor(level) = 对应的 thinking* token（dark: off=darkGray / high=#b294bb …）。
+    const THINK_COLORS: Record<string, string> = {
+      off: "thinkingOff", minimal: "thinkingMinimal", low: "thinkingLow",
+      medium: "thinkingMedium", high: "thinkingHigh", xhigh: "thinkingXhigh", max: "thinkingMax",
+    };
+    // 切换思考等级快捷键：动态读取 app.thinking.cycle（默认 shift+tab，用户可在 keybindings.json 改，此处跟随）
+    const thinkKey = keyText("app.thinking.cycle");
+
+    // 显示单元（按隐藏顺序排列：越靠前越先被隐藏）；（shift+tab）提示最先被隐藏
     const units: Array<{ key: string; render: () => string }> = [];
+    if (thinkKey) units.push({ key: "thinkKey", render: () => muted(`(${thinkKey})`) });
     if (provider) units.push({ key: "provider", render: () => muted(provider ?? "") });
     units.push({ key: "thinkPref", render: () => muted("think") });
     units.push({ key: "status", render: () => bold(color("syntaxKeyword", `\u25cf ${statusLabel}`)) });
     if (statuses.length > 0) units.push({ key: "statuses", render: () => statusStr });
     units.push({ key: "model", render: () => textColor(model) });
-    units.push({ key: "think", render: () => BLUE + think + RESET });
+    units.push({ key: "think", render: () => bold(color(THINK_COLORS[think] ?? "thinkingOff", think)) });
 
-    // 显示顺序（视觉布局）：● READY 最先，model 次之，provider 随后，statuses 靠后
-    // 与隐藏顺序（units 数组次序）相互独立
+    // 显示顺序（视觉布局）：● READY 最先，model 次之，provider 随后，statuses 靠后；
+    // 右侧 think 区显示顺序固定：think 前缀 → 等级值 → (shift+tab)
     const displayOrder: Record<string, number> = { status: 0, model: 1, provider: 2, statuses: 3 };
+    const rightOrder: Record<string, number> = { thinkPref: 0, think: 1, thinkKey: 2 };
 
     // 从第一个单元开始逐个隐藏（隐藏顺序 = units 数组次序），直到能放下
     for (let drop = 0; drop < units.length; drop++) {
       const kept = units.slice(drop);
-      let leftUnits = kept.filter((u) => u.key !== "thinkPref" && u.key !== "think");
+      let leftUnits = kept.filter((u) => u.key !== "thinkPref" && u.key !== "think" && u.key !== "thinkKey");
       leftUnits = leftUnits.sort((a, b) => (displayOrder[a.key] ?? 9) - (displayOrder[b.key] ?? 9));
-      const rightUnits = kept.filter((u) => u.key === "thinkPref" || u.key === "think");
+      const rightUnits = kept
+        .filter((u) => u.key === "thinkPref" || u.key === "think" || u.key === "thinkKey")
+        .sort((a, b) => (rightOrder[a.key] ?? 9) - (rightOrder[b.key] ?? 9));
       const left = leftUnits.map((u) => u.render()).join(` ${muted("\u00b7")} `);
       const right = rightUnits.map((u) => u.render()).join(" ");
       const gap = width - visibleWidth(left) - visibleWidth(right);
@@ -442,8 +465,8 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
         );
       }
     }
-    // 极端兜底：只剩 think 级别
-    return truncateToWidth(BLUE + think + RESET, width, "");
+    // 极端兜底：只剩 think 级别（永远加粗）
+    return truncateToWidth(bold(color(THINK_COLORS[think] ?? "thinkingOff", think)), width, "");
   }
 
   /**
@@ -615,11 +638,13 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
           ctx.isProjectTrusted() ? ctx.cwd : getAgentDir(),
         ).getCompactionSettings().enabled;
       } catch {}
-      // 会话级成本基线：data/wj-status/<sessionId>/cost-tracking.json
+      // 会话级成本基线：项目级 .pi/wj/status/<sessionId>/cost-tracking.json
       const sid = ctx.sessionManager.getSessionId();
-      const costSessionDir = join(getAgentDir(), "data", "wj-status", sid ?? Date.now().toString());
+      const costSessionDir = join(resolveStatusRoot(), sid ?? Date.now().toString());
       mkdirSync(costSessionDir, { recursive: true });
       COST_TRACKING_FILE = join(costSessionDir, "cost-tracking.json");
+      // 余额缓存与会话同目录归档：.pi/wj/status/<sessionId>/balance-cache.json
+      CACHE_FILE = join(costSessionDir, "balance-cache.json");
       footerState = {
         activity: "ready",
         modelId: undefined,
