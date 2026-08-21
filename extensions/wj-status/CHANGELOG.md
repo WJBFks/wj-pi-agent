@@ -25,4 +25,4 @@
 - 思考等级值的颜色 = **输入框边框颜色**：与 interactive-mode 切换思考时 `theme.getThinkingBorderColor(level)` 同一映射（`thinkingOff/Minimal/Low/Medium/High/Xhigh/Max` token，随主题变化）；替换原先硬编码的亮蓝 ANSI。
 - 右侧新增快捷键提示 `(shift+tab)`（灰色 muted），显示为 `think high (shift+tab)`；快捷键**动态读取** `keyText("app.thinking.cycle")`——跟随用户 keybindings.json 自定义，不硬编码。
 - 自适应：**`(shift+tab)` 在所有单元中最先被隐藏**（隐藏优先级最高），窄屏先去掉提示，极限只剩 think 级别值。
-- 交互细节：**等级值永远加粗**（含极窄兜底分支），前缀「think」与 `(shift+tab)` 保持不加粗；off 时显示 `off`（原为 `-`）。
+- 交互细节：**等级值永远加粗**（含极窄兜底分支），前缀「think」与 `(shift+tab)` 保持不加粗；思考等级没有 `off` 档，无有效等级（未知/未获取）统一显示 `-`（`thinkingOff` 色并加粗）。

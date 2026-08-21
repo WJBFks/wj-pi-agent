@@ -13,7 +13,7 @@ pi 的**状态栏 UI**：文本框状态栏 + 底部状态栏。实时展示 mod
 `● status · model · provider · statuses · think 级别`，窄到极限只保留 think 级别。
 - 思考等级值的颜色与**输入框边框颜色一致**（同一 `thinking*` 主题 token，随思考等级/主题切换）且**永远加粗**；
   等级值右侧带灰色快捷键提示 `(shift+tab)`——动态读取 `app.thinking.cycle`，跟随用户改键；
-  宽度不足时 `(shift+tab)` 最先被隐藏，off 时显示 `off`。
+  宽度不足时 `(shift+tab)` 最先被隐藏；思考等级没有 `off` 档，无有效等级统一显示 `-`（`thinkingOff` 色加粗）。
 
 **底部状态栏**（`setFooter`）：在自身行下方**追加其他扩展桥发布的行**，统一渲染。
 - 支持显示：model、tokens、cache、cost、context 用量、CWD、余额（balance）。

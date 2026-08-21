@@ -348,6 +348,8 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
       activity: footerState?.activity ?? "ready",
       modelId: model?.id,
       provider,
+      // 思考级别：思考模式没有 off 档，仅有效级别（minimal/low/medium/high/xhigh/max）才保留；
+      // off（防御）与未知/未获取一律存 undefined，显示层统一输出 `-`。
       thinkingLevel: thinking && thinking !== "off" ? thinking : undefined,
       input,
       output,
@@ -409,7 +411,7 @@ export default function wjStatusExtension(pi: ExtensionAPI): void {
     const s = footerState?.activity ?? "ready";
     const model = footerState?.modelId ?? "-";
     const provider = footerState?.provider;
-    const think = footerState?.thinkingLevel ?? "off";
+    const think = footerState?.thinkingLevel ?? "-"; // 无有效思考级别（未知/off）显示 -
     // 编辑器 theme 是 pi-tui 的 EditorTheme，没有 fg()；颜色统一用 atelier 主题。
     const color = (name: string, x: string) =>
       typeof theme?.fg === "function" ? theme.fg(name, x) : x;
